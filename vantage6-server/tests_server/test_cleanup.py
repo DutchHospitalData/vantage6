@@ -28,6 +28,38 @@ class TestCleanupRunsIsolated(unittest.TestCase):
         Database().clear_data()
 
     @patch("vantage6.server.model.task.Task")
+    def test_cleanup_completed_old_run_blob(self, mock_task):
+        # Now use the actual instances, not ints
+        task = Task(
+            name="test-task",
+            description="Test task for cleanup",
+            image="test-image:latest",
+        )
+        self.session.add(task)
+        self.session.commit()
+
+        run = Run(
+            finished_at=datetime.now(timezone.utc) - timedelta(days=31),
+            result=self.uuid,
+            input="input",
+            log="log should be preserved",
+            status=TaskStatus.COMPLETED,
+            task=task,
+            blob_storage_used=True,
+        )
+
+        self.session.add(run)
+        self.session.commit()
+        with self.assertLogs('cleanup', level='DEBUG') as cm:
+            cleanup.cleanup_runs_data(30, self.azure_config, include_input=True)
+        self.assertTrue(any(f"Deleting blob: {run.result}" in m for m in cm.output))
+        self.session.refresh(run)
+        self.assertEqual(run.result, "")
+        self.assertEqual(run.input, "")
+        self.assertEqual(run.log, "log should be preserved")
+        self.assertIsNotNone(run.cleanup_at)
+
+    @patch("vantage6.server.model.task.Task")
     def test_cleanup_completed_old_run(self, mock_task):
         # Now use the actual instances, not ints
         task = Task(

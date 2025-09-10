@@ -1,66 +1,30 @@
-from uuid import uuid1
 import unittest
-import logging
-import json
+
+from datetime import datetime, timedelta, timezone
 import uuid
+import yaml
 import random
 import string
-import yaml
-
-
-from http import HTTPStatus
-from unittest.mock import MagicMock, patch
-from flask import Response as BaseResponse
-from flask.testing import FlaskClient
+from unittest.mock import patch
 from flask_socketio import SocketIO
-from werkzeug.utils import cached_property
+from http import HTTPStatus
 
-from vantage6.common import logger_name
-from vantage6.common.globals import APPNAME, InstanceType
+from vantage6.server.model import Organization, Collaboration, Task, Run, Rule, User
+from vantage6.server.model.rule import Scope, Operation
+from vantage6.server.model.base import Database, DatabaseSessionManager
 from vantage6.common.task_status import TaskStatus
-from vantage6.common.serialization import serialize
-from vantage6.common import bytes_to_base64s
+from vantage6.common.globals import APPNAME, InstanceType
 from vantage6.backend.common import test_context
 from vantage6.server.globals import PACKAGE_FOLDER
 from vantage6.server import ServerApp
-from vantage6.backend.common import session
-from vantage6.server.model import (
-    Rule,
-    Role,
-    Organization,
-    User,
-    Node,
-    Collaboration,
-    Task,
-    Run,
-    AlgorithmStore,
-    Study,
-)
-from vantage6.server.model.rule import Scope, Operation
-from vantage6.server._version import __version__
-from vantage6.server.model.base import Database, DatabaseSessionManager
 from vantage6.server.controller.fixture import load
-
-
-logger = logger_name(__name__)
-log = logging.getLogger(logger)
-
-
-class Response(BaseResponse):
-    @cached_property
-    def json(self):
-        return json.loads(self.data)
-
-
-class TestNode(FlaskClient):
-    def open(self, *args, **kwargs):
-        if "json" in kwargs:
-            kwargs["data"] = json.dumps(kwargs.pop("json"))
-            kwargs["content_type"] = "application/json"
-        return super().open(*args, **kwargs)
+import sys
+import types
+sys.modules['uwsgi'] = types.ModuleType('uwsgi')
 
 
 class TestTask(unittest.TestCase):
+    
     @classmethod
     def setUpClass(cls):
         """Called immediately before running a test method."""
@@ -101,24 +65,20 @@ class TestTask(unittest.TestCase):
     @classmethod
     def setUp(cls):
         # set session.session
+        cls.azure_config = {
+            "container_name": "test-container",
+            "blob_service_client": patch(
+                "azure.storage.blob.BlobServiceClient"
+            ).start(),
+        }
+        cls.uuid = str(uuid.uuid4())
         DatabaseSessionManager.get_session()
 
     @classmethod
     def tearDown(cls):
         # unset session.session
         DatabaseSessionManager.clear_session()
-
-    def login(self, type_="root"):
-        with self.server.app.test_client() as client:
-            tokens = client.post("/api/token/user", json=self.credentials[type_]).json
-        if "access_token" in tokens:
-            headers = {"Authorization": "Bearer {}".format(tokens["access_token"])}
-            return headers
-        else:
-            print("something wrong, during login:")
-            print(tokens)
-            return None
-
+    
     def create_user(self, organization=None, rules=[], password="password"):
         if not organization:
             organization = Organization(name=str(uuid.uuid1()))
@@ -140,126 +100,24 @@ class TestTask(unittest.TestCase):
         self.credentials[username] = {"username": username, "password": password}
 
         return user
-
-    def create_node(self, organization=None, collaboration=None):
-        if not organization:
-            organization = Organization(name=str(uuid.uuid1()))
-
-        if not collaboration:
-            collaboration = Collaboration(name=str(uuid.uuid1()))
-
-        api_key = str(uuid1())
-        node = Node(
-            name=str(uuid1()),
-            api_key=api_key,
-            organization=organization,
-            collaboration=collaboration,
-        )
-        node.save()
-
-        return node, api_key
-
-    def login_node(self, api_key):
-        tokens = self.app.post("/api/token/node", json={"api_key": api_key}).json
+    
+    def login(self, type_="root"):
+        with self.server.app.test_client() as client:
+            tokens = client.post("/api/token/user", json=self.credentials[type_]).json
         if "access_token" in tokens:
             headers = {"Authorization": "Bearer {}".format(tokens["access_token"])}
+            return headers
         else:
+            print("something wrong, during login:")
             print(tokens)
-
-        return headers
-
-    def login_container(
-        self, collaboration=None, organization=None, node=None, task=None, api_key=None
-    ):
-        if not node:
-            if not collaboration:
-                collaboration = Collaboration(name=str(uuid.uuid1()))
-            if not organization:
-                organization = Organization(name=str(uuid.uuid1()))
-            api_key = str(uuid1())
-            node = Node(
-                organization=organization, collaboration=collaboration, api_key=api_key
-            )
-            node.save()
-        else:
-            collaboration = node.collaboration
-            organization = node.organization
-
-        if not task:
-            task = Task(
-                image="some-image",
-                collaboration=collaboration,
-                runs=[Run(status=TaskStatus.PENDING)],
-            )
-            task.save()
-
-        headers = self.login_node(api_key)
-        tokens = self.app.post(
-            "/api/token/container",
-            headers=headers,
-            json={"image": "some-image", "task_id": task.id},
-        ).json
-
-        if "msg" in tokens:
-            print(tokens["msg"])
-
-        headers = {"Authorization": "Bearer {}".format(tokens["container_token"])}
-        return headers
-
-    def paginated_list(self, url: str, headers: dict = None) -> tuple[Response, list]:
-        """
-        Get all resources of a list endpoint by browsing through all pages
-
-        Parameters
-        ----------
-        url: str
-            The url of the list endpoint
-        headers: dict
-            The headers to use for the request
-        kwargs: dict
-            Additional arguments to pass to the request
-
-        Returns
-        -------
-        tuple[flask.Response, list]
-            The response and the list of all resources
-        """
-        result = self.app.get(url, headers=headers)
-
-        # check if response is OK
-        if result.status_code != HTTPStatus.OK:
-            return result, []
-
-        # get data
-        links = result.json.get("links")
-        page = 1
-        json_data = result.json.get("data")
-        if json_data is None:
-            json_data = []
-        while links and links.get("next"):
-            page += 1
-            new_response = self.app.get(links.get("next"), headers=headers)
-            json_data += (
-                new_response.json.get("data") if new_response.json.get("data") else []
-            )
-            links = new_response.json.get("links")
-        return result, json_data
-
-    def create_node_and_login(self, *args, **kwargs):
-        node, api_key = self.create_node(*args, **kwargs)
-        return self.login_node(api_key)
-
+            return None
+    
     def create_user_and_login(self, organization=None, rules=[]):
         user = self.create_user(organization, rules)
         return self.login(user.username)
-    
+  
     def test_delete_task_and_blob(self):
         """Test the /api/task/<id>/status endpoint"""
-
-        # Test non-existent task
-        headers = self.create_user_and_login()
-        result = self.app.get("/api/task/9999/status", headers=headers)
-        self.assertEqual(result.status_code, HTTPStatus.NOT_FOUND)
 
         # Create organizations and collaboration
         org = Organization()
@@ -273,15 +131,39 @@ class TestTask(unittest.TestCase):
 
         # Add runs to the task with valid statuses
         run1 = Run(task=task, status=TaskStatus.ACTIVE.value)
-        run2 = Run(task=task, status=TaskStatus.PENDING.value)
+        run2 = Run(
+            finished_at=datetime.now(timezone.utc) - timedelta(days=31),
+            result=self.uuid,
+            input="input",
+            log="log should be preserved",
+            status=TaskStatus.COMPLETED,
+            task=task,
+            blob_storage_used=True,
+        )
         run1.save()
         run2.save()
+        
+        run1_id = run1.id
+        run2_id = run2.id
+        task_id = task.id
+       # Test with organization permissions (should succeed for the same organization)
+        rule = Rule.get_by_("task", Scope.GLOBAL, Operation.VIEW)
+        headers = self.create_user_and_login(rules=[rule])
+        result = self.app.get(f"/api/task/{task.id}/status", headers=headers)
+        self.assertEqual(result.json["status"], TaskStatus.ACTIVE)
+        
+        # Delete task with runs
+        rule = Rule.get_by_("task", Scope.GLOBAL, Operation.DELETE)
+        headers = self.create_user_and_login(rules=[rule])
+        results = self.app.delete(f"/api/task/{task.id}", headers=headers)
+        self.assertEqual(results.status_code, HTTPStatus.OK)
 
-        # Delete task
-        # Test if runs and blobs are deleted
+        # Check if the runs and task are deleted
+        self.assertIsNone(Run.get(run1_id))
+        self.assertIsNone(Run.get(run2_id))
+        self.assertIsNone(Task.get(task_id))
 
         # Cleanup
-        task.delete()
         org.delete()
         org2.delete()
         col.delete()
