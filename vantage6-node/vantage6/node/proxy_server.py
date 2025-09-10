@@ -274,8 +274,7 @@ def proxy_task():
         client: NodeClient = app.config.get("SERVER_IO")
         # If blob store is enabled, we skip base64 encoding of the message.
         encrypted_input = client.cryptor.encrypt_bytes_to_str(
-            base64s_to_bytes(input_),
-            public_key
+            base64s_to_bytes(input_), public_key
         )
 
         log.debug("Input successfully encrypted for organization %s!", organization_id)
@@ -350,10 +349,7 @@ def proxy_result() -> Response:
     results = get_response_json_and_handle_exceptions(response)
 
     for result in results["data"]:
-        if (
-            not result["blob_storage_used"]
-            or result["blob_storage_used"] == False
-        ):
+        if not result["blob_storage_used"] or result["blob_storage_used"] == False:
             result = decrypt_result(result)
 
     return results, response.status_code
@@ -393,10 +389,7 @@ def proxy_results(id_: int) -> Response:
 
     # Try to decrypt the results
     result = get_response_json_and_handle_exceptions(response)
-    if (
-        not result["blob_storage_used"]
-        or result["blob_storage_used"] == False
-    ):
+    if not result["blob_storage_used"] or result["blob_storage_used"] == False:
         result = decrypt_result(result)
 
     return result, response.status_code
@@ -478,80 +471,6 @@ def stream_handler(id: str) -> FlaskResponse:
         )
     else:
         # Return the raw content if not a valid stream or an error occurred
-        return (
-            backend_response.content,
-            backend_response.status_code,
-            backend_response.headers.items(),
-        )
-
-
-@app.route("/blobstream/delete/<string:id>", methods=["DELETE"])
-def stream_handler_delete(id: str) -> FlaskResponse:
-    """
-    Proxy stream handler for DELETE requests, delete a blob by its id from the Azure server.
-    
-    Parameters
-    ----------
-    id : str
-        The id of the blob to be deleted.
-
-    Returns
-    -------
-    FlaskResponse
-        A Flask response object containing if the blob was successfully deleted from the server.
-        If an error occurs, it returns an error message with the appropriate HTTP status code.
-    """
-
-    log.info("Proxy stream handler called with id: %s", id)
-    headers = {}
-    for h in ["Authorization", "Content-Type", "Content-Length"]:
-        if h in request.headers:
-            headers[h] = request.headers[h]
-    method = get_method(request.method)
-    url = f"{server_url}/blobstream/delete/{id}"
-    log.info("Making proxied request to %s", url)
-
-    backend_response = method(url, stream=True, params=request.args, headers=headers)
-
-    log.info("Received response with status code %s", backend_response.status_code)
-
-    if backend_response.status_code > 210:
-        log.warning(
-            "Proxy server received status code %s", backend_response.status_code
-        )
-        try:
-            log.warning("Error messages: %s", backend_response.json())
-        except Exception:
-            log.warning(
-                "Could not decode error response as JSON. Response text: %s",
-                backend_response.text,
-            )
-        log.debug(
-            "method: %s, url: %s, params: %s, headers: %s",
-            request.method,
-            url,
-            request.args,
-            headers,
-        )
-        return (
-            backend_response.content,
-            backend_response.status_code,
-            backend_response.headers.items(),
-        )
-
-    # Only decrypt if the response is successful and content type is as expected
-    content_type = backend_response.headers.get("Content-Type", "")
-    if (
-        backend_response.status_code <= 210
-        and "application/octet-stream" in content_type
-    ):
-        return FlaskResponse(
-            backend_response.content,
-            status=backend_response.status_code,
-            headers=dict(backend_response.headers),
-        )
-    else:
-        # Return the raw content if not a valid stream or error occurred
         return (
             backend_response.content,
             backend_response.status_code,

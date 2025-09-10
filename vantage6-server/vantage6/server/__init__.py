@@ -55,7 +55,7 @@ from vantage6.common import logger_name, split_rabbitmq_uri
 from vantage6.common.globals import (
     PING_INTERVAL_SECONDS,
     AuthStatus,
-    DEFAULT_PROMETHEUS_EXPORTER_PORT
+    DEFAULT_PROMETHEUS_EXPORTER_PORT,
 )
 from vantage6.backend.common.globals import HOST_URI_ENV, DEFAULT_SUPPORT_EMAIL_ADDRESS
 from vantage6.backend.common.jsonable import jsonable
@@ -236,7 +236,9 @@ class ServerApp:
             )
 
         if connection_string:
-            self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+            self.blob_service_client = BlobServiceClient.from_connection_string(
+                connection_string
+            )
 
         if not self.blob_service_client:
             log.warning(
@@ -894,7 +896,6 @@ class ServerApp:
             try:
                 cleanup.cleanup_runs_data(
                     self.ctx.config.get("runs_data_cleanup_days"),
-                    self.ctx.config.get("large_result_store", {}),
                     include_input=include_input,
                 )
             except Exception as e:
