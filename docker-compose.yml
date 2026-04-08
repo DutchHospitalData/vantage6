@@ -24,7 +24,7 @@ services:
     ]
 
   ui:
-    image: localhost:5000/infrastructure/ui:latest
+    image: localhost:5000/infrastructure/ui:local
     ports:
       - "8000:80"
     environment:
