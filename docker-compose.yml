@@ -23,6 +23,16 @@ services:
       "--pyargv", "/mnt/config.yaml"
     ]
 
+  ui:
+    image: localhost:5000/infrastructure/ui:latest
+    ports:
+      - "8000:80"
+    environment:
+      - SERVER_URL=http://localhost:7601
+      - API_PATH=/api
+    depends_on:
+      - vantage6-server
+
 
   database:
     image: postgres:10
