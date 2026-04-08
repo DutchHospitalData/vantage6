@@ -1,55 +1,27 @@
 services:
 
-  # vantage6-server:
-  #   image: harbor2.vantage6.ai/infrastructure/server:latest
-  #   ports:
-  #     - "7601:7601"
-  #   depends_on:
-  #     - database
-  #   volumes:
-  #     - ./configs/postgress.yaml:/mnt/config.yaml
-  #   command: [
-  #     "uwsgi --http :7601 --gevent 1000 --http-websockets
-  #       --http-chunked-input --http-keepalive --post-buffering 0
-  #       --master --callable app --disable-logging
-  #       --wsgi-file /vantage6/vantage6-server/vantage6/server/wsgi.py
-  #       --pyargv /mnt/config.yaml"
-  #   ]
-
-  
-  # v6node_docker:
-  #   image: drplugindhdprd.azurecr.io/v6node:latest
-  #   volumes:
-  #     # Docker socket – the node needs this to launch algorithm containers
-  #     - /var/run/docker.sock:/var/run/docker.sock
-  #     # Persistent task directory (matches task_dir in config template)
-  #     - ${VANTAGE_NODE_PATH:-/home/vantage6}/.local/share/vantage6/node/${NODE_NAME:-v6-node}:/mnt/data
-  #     # Database files (matches databases[].uri in config template)
-  #     - ${VANTAGE_NODE_PATH:-/home/vantage6}/database:/mnt/database
-  #   environment:
-  #     - ADMISSION_TYPE=${ADMISSION_TYPE}
-  #     - AGB_CODE=${AGB_CODE}
-  #     # Pass host UID/GID so algorithm containers inherit the right permissions
-  #     - UID=${UID}
-  #     - GID=${GID}
-  #     - NODE_NAME=${NODE_NAME:-v6-node}
-  #     - VANTAGE_NODE_PATH=${VANTAGE_NODE_PATH:-/home/vantage6}
-  #     - DATA_PATH=${DATA_PATH:-/data/repo}
-  #     - gpu=${gpu:-false}
-  #   secrets:
-  #     - hospital_v6_secrets
-  #     - azure_client_secret
-  #     - azure_client_id
-  #     - azure_tenant_id
-  #     - azure_blob_account_url
-  #     - docker_registry_url
-  #     - docker_registry_username
-  #     - docker_registry_password
-  #   # Allow the container user to access /var/run/docker.sock
-  #   # Run: stat -c '%g' /var/run/docker.sock  to find DOCKER_GID If the base image runs as a non-root user, this will lead to permission denied when launching algorithm containers.
-  #   # group_add:
-  #   #   - "${DOCKER_GID}"
-  #   restart: unless-stopped
+  vantage6-server:
+    image: localhost:5000/infrastructure/server:local
+    ports:
+      - "7601:7601"
+    depends_on:
+      - database
+    volumes:
+      - ./configs/postgress.yaml:/mnt/config.yaml
+    command: [
+      "uwsgi",
+      "--http", ":7601",
+      "--gevent", "1000",
+      "--http-websockets",
+      "--http-chunked-input",
+      "--http-keepalive",
+      "--post-buffering", "0",
+      "--master",
+      "--callable", "app",
+      "--disable-logging",
+      "--wsgi-file", "/vantage6/vantage6-server/vantage6/server/wsgi.py",
+      "--pyargv", "/mnt/config.yaml"
+    ]
 
 
   database:

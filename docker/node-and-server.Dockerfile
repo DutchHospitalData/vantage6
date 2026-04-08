@@ -11,7 +11,6 @@ ARG REGISTRY=harbor2.vantage6.ai
 FROM ${REGISTRY}/infrastructure/infrastructure-base:${BASE}
 
 LABEL version=${TAG}
-LABEL maintainer="Frank Martin <f.martin@iknl.nl>"
 
 # Update and upgrade - switch apt to HTTPS (port 80 blocked)
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
