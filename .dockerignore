@@ -1,0 +1,24 @@
+.pytest_cache
+.ruff_cache
+.secrets
+aioc.egg-info
+build
+.python-version
+__pycache__
+*.pyc
+.DS_Store
+tests
+dockerfiles
+docker-compose*.yml
+docker-compose*.yaml
+.git*
+*.egg-info
+*.log
+__pycache__/**
+
+# IDE and Editor Configurations
+.vscode/
+.env*
+*.env
+.venv
+uv.lock

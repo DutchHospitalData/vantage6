@@ -1,0 +1,61 @@
+# Trivy configuration for DS team repositories.
+#
+# This file is used by the reusable Trivy workflow and can be committed
+# to any repository that calls the workflow.  Copy it to the repo root
+# and adjust as needed.
+#
+# Docs: https://aquasecurity.github.io/trivy/latest/docs/references/configuration/config-file/
+
+# --- Severity & exit behaviour ---
+severity:
+  - CRITICAL
+  - HIGH
+  - MEDIUM
+
+# --- Scanners to enable ---
+# vuln      = known CVEs in OS packages and language dependencies
+# misconfig = Dockerfile / IaC best-practice checks
+# secret    = leaked secrets / tokens
+scanners:
+  - vuln
+  - misconfig
+  - secret
+
+# --- Vulnerability scanner options ---
+pkg:
+  types:
+    - os         # OS packages (apt, apk, yum)
+    - library    # Language-specific packages (pip, npm, go, etc.)
+
+# --- Misconfiguration options ---
+misconfig:
+  # Check Dockerfiles, Terraform, CloudFormation, Kubernetes manifests
+  include:
+    - dockerfile
+    - terraform
+
+# --- Skip paths that are not relevant ---
+skip-dirs:
+  - .git
+  - .github
+  - .logs
+  - node_modules
+  - .venv
+  - .vscode
+  - __pycache__
+  - .ruff_cache
+  - data
+  - tmp
+  - .secrets
+
+# --- Skip files ---
+skip-files:
+  - "*.md"
+  - "*.txt"
+  - "*.log"
+
+
+# --- Ignore unfixed vulnerabilities ---
+# Set to true to only report CVEs that have a fix available.
+# For strictest scanning, set to false.
+ignore-unfixed: false

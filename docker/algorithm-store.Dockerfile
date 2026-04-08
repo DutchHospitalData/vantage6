@@ -6,13 +6,17 @@
 #
 ARG TAG=latest
 ARG BASE=4.14
-FROM harbor2.vantage6.ai/infrastructure/infrastructure-base:${BASE}
+ARG REGISTRY=harbor2.vantage6.ai
+FROM ${REGISTRY}/infrastructure/infrastructure-base:${BASE}
 
 LABEL version=${TAG}
 LABEL maintainer="Frank Martin <f.martin@iknl.nl>; Bart van Beusekom <b.vanbeusekom@iknl.nl>"
 
-RUN apt update -y
-RUN apt upgrade -y
+# Switch apt to HTTPS (port 80 blocked)
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt update -y \
+    && apt upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
 
 # Fix DB issue
 RUN pip install psycopg2-binary

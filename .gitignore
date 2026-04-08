@@ -14,11 +14,57 @@ docs/function-docs/_autosummary
 *.sublime-workspace
 .vscode/
 
+# environment configuration
+env/
+.env
+.ropeproject
+.python-version
+.venv
+
 # build files
 **/build/
 **/dist/
 *.egg-info
 *.code-workspace
+
+# Package files
+*.egg
+*.eggs/
+.installed.cfg
+*.egg-info
+*.whl
+
+# Temporary and binary files
+*~
+*.py[cod]
+*.so
+*.cfg
+!setup.cfg
+*.orig
+*.log
+*.pot
+__pycache__/
+*.pyc
+.cache/*
+.*.swp
+*.gz
+*.bz2
+.ipynb_checkpoints
+temp/
+tmp/
+*.pickle
+.ruff_cache/
+.pytest_cache/
+
+# Large/many data or test files
+.envrc
+
+# files that might contain sensitive information
+sensitive/
+.secrets
+.secrets/
+**secrets.toml
+*.pem
 
 # UI build files
 **/node_modules/

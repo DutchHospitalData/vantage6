@@ -1,29 +1,32 @@
 ARG TAG=latest
 ARG BASE=4.0
+ARG REGISTRY=harbor2.vantage6.ai
 # TODO FM 17-10-2023: We should pin the python OHDSI package versions.
 # We could do this by supplying an environment var or store a requirements.txt
 # file in the repo.however for now lets always use the latest in a build.
 # ARG OHDSI_VERSION=0.3.2
-FROM harbor2.vantage6.ai/infrastructure/algorithm-base:${BASE}
+FROM ${REGISTRY}/infrastructure/algorithm-base:${BASE}
 
 LABEL version=${TAG}
 # LABEL ohdsi_version=${OHDSI_VERSION}
 LABEL maintainer="F.C.Martin <f.martin@iknl.nl>"
 
 # install dependencies for the ohdsi tools part of the wrapper
-RUN apt-get update
-RUN apt-get install -y build-essential libcurl4-gnutls-dev libxml2-dev \
-                       libssl-dev dirmngr apt-transport-https ca-certificates \
-                       software-properties-common gnupg2
+# Switch apt to HTTPS (port 80 blocked)
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y build-essential libcurl4-gnutls-dev libxml2-dev \
+                          libssl-dev dirmngr apt-transport-https ca-certificates \
+                          software-properties-common gnupg2
 
 # install R
 RUN apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-key \
                             '95C0FAF38DB3CCAD0C080A7BDC78B2DDEABC47B7'
 RUN add-apt-repository \
-    'deb http://cloud.r-project.org/bin/linux/debian bookworm-cran40/'
+    'deb https://cloud.r-project.org/bin/linux/debian bookworm-cran40/'
 
-RUN apt-get update
-RUN apt-get install -y r-base
+RUN apt-get update \
+    && apt-get install -y r-base
 
 # install Java
 RUN apt-get install -y openjdk-17-jre

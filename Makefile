@@ -2,16 +2,17 @@
 # this Makefile
 
 # docker image tag
-TAG ?= cotopaxi
-REGISTRY ?= harbor2.vantage6.ai
-PLATFORMS ?= linux/arm64,linux/amd64
+#TAG ?= latest
+#REGISTRY ?= drplugindhdprd.azurecr.io
+#PLATFORMS ?= linux/arm64,linux/amd64
+
 # Example for local development
-# TAG ?= local
-# REGISTRY ?= localhost
-# PLATFORMS ?= linux/amd64
+TAG ?= local
+REGISTRY ?= localhost:5000
+PLATFORMS ?= linux/amd64
 
 # infrastructure base image version
-BASE ?= 4.0
+BASE ?= local
 
 # Use `make PUSH_REG=true` to push images to registry after building
 PUSH_REG ?= false
@@ -80,24 +81,24 @@ uninstall:
 	pip uninstall -y vantage6-algorithm-store
 
 install:
-	cd vantage6-common && pip install .
-	cd vantage6-client && pip install .
-	cd vantage6-algorithm-tools && pip install .
-	cd vantage6 && pip install .
-	cd vantage6-node && pip install .
-	cd vantage6-backend-common && pip install .
-	cd vantage6-server && pip install .
-	cd vantage6-algorithm-store && pip install .
+	cd vantage6-common && uv pip install .
+	cd vantage6-client && uv pip install .
+	cd vantage6-algorithm-tools && uv pip install .
+	cd vantage6 && uv pip install .
+	cd vantage6-node && uv pip install .
+	cd vantage6-backend-common && uv pip install .
+	cd vantage6-server && uv pip install .
+	cd vantage6-algorithm-store && uv pip install .
 
 install-dev:
-	cd vantage6-common && pip install -e .
-	cd vantage6-client && pip install -e .
-	cd vantage6-algorithm-tools && pip install -e .
-	cd vantage6 && pip install -e .[dev]
-	cd vantage6-node && pip install -e .[dev]
-	cd vantage6-backend-common && pip install -e .[dev]
-	cd vantage6-server && pip install -e .[dev]
-	cd vantage6-algorithm-store && pip install -e .[dev]
+	cd vantage6-common && uv pip install -e .
+	cd vantage6-client && uv pip install -e .
+	cd vantage6-algorithm-tools && uv pip install -e .
+	cd vantage6 && uv pip install -e .[dev]
+	cd vantage6-node && uv pip install -e .[dev]
+	cd vantage6-backend-common && uv pip install -e .[dev]
+	cd vantage6-server && uv pip install -e .[dev]
+	cd vantage6-algorithm-store && uv pip install -e .[dev]
 
 base-image:
 	@echo "Building ${REGISTRY}/infrastructure/infrastructure-base:${TAG}"
@@ -128,6 +129,7 @@ algorithm-omop-base-image:
 		$(if ${_condition_tag_latest},--tag ${REGISTRY}/infrastructure/algorithm-ohdsi-base:latest) \
 		--build-arg BASE=${BASE} \
 		--build-arg TAG=${TAG} \
+		--build-arg REGISTRY=${REGISTRY} \
 		--platform linux/amd64 \
 		-f ./docker/algorithm-ohdsi-base.Dockerfile \
 		$(if ${_condition_push},--push .,.)
@@ -196,6 +198,7 @@ image:
 		$(if ${_condition_tag_latest},--tag ${REGISTRY}/infrastructure/server:latest) \
 		--build-arg TAG=${TAG} \
 		--build-arg BASE=${BASE} \
+		--build-arg REGISTRY=${REGISTRY} \
 		--platform ${PLATFORMS} \
 		-f ./docker/node-and-server.Dockerfile \
 		$(if ${_condition_push},--push .,.)
@@ -207,6 +210,7 @@ algorithm-store-image:
 		$(if ${_condition_tag_latest},--tag ${REGISTRY}/infrastructure/algorithm-store:latest) \
 		--build-arg TAG=${TAG} \
 		--build-arg BASE=${BASE} \
+		--build-arg REGISTRY=${REGISTRY} \
 		--platform ${PLATFORMS} \
 		-f ./docker/algorithm-store.Dockerfile \
 		$(if ${_condition_push},--push .,.)

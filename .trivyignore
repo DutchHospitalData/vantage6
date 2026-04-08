@@ -1,0 +1,3 @@
+# Test/development RSA key pair used for local development and testing only.
+# Not a real secret - safe to ignore.
+vantage6-node/vantage6/_data/private_key.pem
