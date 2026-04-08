@@ -34,7 +34,7 @@ setup(
         "flask==3.1.1",
         "flask-mail==0.9.1",
         "Flask-RESTful==0.3.10",
-        "marshmallow==3.26.2",
+        "marshmallow==4.3.0",
         "marshmallow-sqlalchemy==0.29.0",
         "SQLAlchemy==1.4.46",
         "prometheus-client==0.21.1",
