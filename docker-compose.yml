@@ -36,12 +36,15 @@ services:
 
   vantage6-node:
     image: localhost:5000/infrastructure/node:local
-    depends_on:
-      - vantage6-server
     volumes:
-      - ./.configs/node.yaml:/mnt/config/node.yaml
+      # v6 node config yaml location
+      - ./.config/vantage6/node/node.yaml:/mnt/config/node.yaml
+      # Docker socket – the node needs this to launch algorithm containers
       - /var/run/docker.sock:/var/run/docker.sock
+      # Database files (matches databases[].uri in config template)
       - vantage6-node-data:/mnt/data
+      # Persistent task directory (matches task_dir in config template)
+      - /home/vantage-node/.local/share/vantage6/node/node:/mnt/data
     #secrets:
       # - azure_client_secret
       # - azure_client_id
@@ -55,7 +58,6 @@ services:
     ]
 
   database:
-    image: postgres:10
     restart: always
     environment:
       POSTGRES_PASSWORD: changeme

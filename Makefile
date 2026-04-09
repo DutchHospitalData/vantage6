@@ -2,17 +2,17 @@
 # this Makefile
 
 # docker image tag
-#TAG ?= latest
-#REGISTRY ?= drplugindhdprd.azurecr.io
-#PLATFORMS ?= linux/arm64,linux/amd64
-
-# Example for local development
-TAG ?= local
-REGISTRY ?= localhost:5000
+TAG ?= latest
+REGISTRY ?= drplugindhdprd.azurecr.io
 PLATFORMS ?= linux/amd64
 
+# Example for local development
+# TAG ?= local
+# REGISTRY ?= localhost:5000
+# PLATFORMS ?= linux/amd64
+
 # infrastructure base image version
-BASE ?= local
+BASE ?= latest
 
 # Use `make PUSH_REG=true` to push images to registry after building
 PUSH_REG ?= false
@@ -20,7 +20,7 @@ PUSH_REG ?= false
 # We use a conditional (true on any non-empty string) later. To avoid
 # accidents, we don't use user-controlled PUSH_REG directly.
 # See: https://www.gnu.org/software/make/manual/html_node/Conditional-Functions.html
-_condition_push :=
+_condition_push := true
 ifeq ($(PUSH_REG), true)
 	_condition_push := not_empty_so_true
 endif
