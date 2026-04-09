@@ -34,6 +34,26 @@ services:
       - vantage6-server
 
 
+  vantage6-node:
+    image: localhost:5000/infrastructure/node:local
+    depends_on:
+      - vantage6-server
+    volumes:
+      - ./.configs/node.yaml:/mnt/config/node.yaml
+      - /var/run/docker.sock:/var/run/docker.sock
+      - vantage6-node-data:/mnt/data
+    #secrets:
+      # - azure_client_secret
+      # - azure_client_id
+      # - azure_tenant_id
+      # - azure_blob_account_url
+    command: [
+      "vnode-local", "start",
+      "-c", "/mnt/config/node.yaml",
+      "-n", "node",
+      "--dockerized"
+    ]
+
   database:
     image: postgres:10
     restart: always
@@ -48,8 +68,6 @@ services:
 
 
 secrets:
-  hospital_v6_secrets:
-    file: ./.secrets/hospital_v6.env
   azure_client_secret:
     file: ./.secrets/azure_client_secret.txt
   azure_client_id:
@@ -58,9 +76,6 @@ secrets:
     file: ./.secrets/azure_tenant_id.txt
   azure_blob_account_url:
     file: ./.secrets/azure_blob_account_url.txt
-  docker_registry_url:
-    file: ./.secrets/docker_registry_url.txt
-  docker_registry_username:
-    file: ./.secrets/docker_registry_username.txt
-  docker_registry_password:
-    file: ./.secrets/docker_registry_password.txt
+
+volumes:
+  vantage6-node-data:

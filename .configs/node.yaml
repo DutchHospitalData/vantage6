@@ -1,0 +1,35 @@
+api_key: changeme
+server_url: http://vantage6-server
+port: 7601
+api_path: /api
+
+databases:
+  - label: default
+    uri: /mnt/databases/default.csv
+    type: csv
+
+encryption:
+  enabled: false
+  private_key: null
+
+logging:
+  backup_count: 5
+  datefmt: '%Y-%m-%d %H:%M:%S'
+  file: /mnt/log/node.log
+  format: '%(asctime)s - %(name)-14s - %(levelname)-8s - %(message)s'
+  level: DEBUG
+  max_size: 1024
+  use_console: true
+  loggers:
+    - level: warning
+      name: urllib3
+    - level: warning
+      name: requests
+    - level: warning
+      name: engineio.client
+    - level: warning
+      name: docker.utils.config
+    - level: warning
+      name: docker.auth
+
+task_dir: /mnt/data
