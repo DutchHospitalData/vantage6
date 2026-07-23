@@ -15,6 +15,7 @@ import docker
 import re
 import shutil
 
+from threading import Lock
 from typing import NamedTuple
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from vantage6.common.docker.addons import (
     get_container,
     get_digest,
     get_image_name_wo_tag,
+    remove_container,
     running_in_docker,
 )
 from vantage6.common.globals import (
@@ -157,6 +159,15 @@ class DockerManager(DockerBaseManager):
         # keep track of the containers that have failed to start
         self.failed_tasks: list[DockerTaskManager] = []
 
+        # reference count per temporary volume name. A single tmp volume is
+        # shared by all tasks with the same job_id (e.g. a parent task and its
+        # child tasks). The volume is only removed once the last task using it
+        # has finished. The lock guards this dict because volumes are reserved
+        # on the main thread (__start_task) and released on the speaking worker
+        # thread (get_result).
+        self._volume_refcounts: dict[str, int] = {}
+        self._volume_lock = Lock()
+
         # before a task is executed it gets exposed to these policies
         self._policies = self._setup_policies(config)
 
@@ -194,6 +205,113 @@ class DockerManager(DockerBaseManager):
             self.log.warning(
                 "Algorithm logs and errors will be shared with the server."
             )
+
+        # remove any leftover containers from a previous (crashed) session
+        self._remove_orphaned_containers()
+        self._remove_orphaned_volumes()
+
+    def _remove_orphaned_containers(self) -> None:
+        """
+        Remove leftover algorithm and helper containers from a previous node
+        session that was not shut down cleanly.
+        """
+        orphans = self.docker.containers.list(
+            all=True,
+            filters={"label": [f"node={self.node_name}"]},
+        )
+        if orphans:
+            self.log.info(
+                "Found %d orphaned container(s) from a previous session, removing...",
+                len(orphans),
+            )
+        for container in orphans:
+            self.log.debug("Removing orphaned container: %s", container.name)
+            remove_container(container, kill=True)
+
+    def _remove_orphaned_volumes(self) -> None:
+        """
+        Remove temporary volumes belonging to this node that are no longer in
+        use by any running container.
+        """
+        # The volume naming pattern is: {APPNAME}-{name}-{scope}-{job_id}-tmpvol
+        prefix = f"{APPNAME}-{self.ctx.name}-{self.ctx.scope}-"
+        suffix = "-tmpvol"
+        for volume in self.docker.volumes.list():
+            if volume.name.startswith(prefix) and volume.name.endswith(suffix):
+                try:
+                    volume.remove()
+                    self.log.debug("Removed orphaned volume: %s", volume.name)
+                except docker.errors.APIError:
+                    # volume is still in use by a container
+                    self.log.debug(
+                        "Volume %s still in use, skipping", volume.name
+                    )
+
+    def _reserve_volume(self, vol_name: str) -> None:
+        """
+        Register that a task is about to use the temporary volume and make sure
+        the volume exists.
+
+        Reserving increments the reference count for the volume. Creating the
+        volume is done under the same lock so that a concurrent
+        ``_try_remove_tmp_volume`` on another thread cannot delete the volume
+        in the small window between creating it and reserving it.
+
+        Parameters
+        ----------
+        vol_name: str
+            Name of the temporary volume to reserve
+        """
+        with self._volume_lock:
+            self._volume_refcounts[vol_name] = (
+                self._volume_refcounts.get(vol_name, 0) + 1
+            )
+            self.create_volume(vol_name)
+
+    def _try_remove_tmp_volume(self, task: DockerTaskManager) -> None:
+        """
+        Release the temporary volume of a finished task and remove it once no
+        other task is using it anymore.
+
+        The reference count is decremented; the volume is only removed when the
+        count reaches zero (i.e. the last task sharing this job_id volume has
+        finished). Docker's own "volume in use" error is kept as a final
+        backstop so a volume that is somehow still mounted is never deleted.
+
+        Parameters
+        ----------
+        task: DockerTaskManager
+            The task whose temporary volume should be released
+        """
+        vol_name = getattr(task, "tmp_vol_name", None)
+        if not vol_name:
+            return
+
+        with self._volume_lock:
+            count = self._volume_refcounts.get(vol_name, 0) - 1
+            if count > 0:
+                self._volume_refcounts[vol_name] = count
+                self.log.debug(
+                    "Volume %s still in use (%d task(s) left), keeping",
+                    vol_name,
+                    count,
+                )
+                return
+
+            # last task using this volume has finished
+            self._volume_refcounts.pop(vol_name, None)
+            try:
+                volume = self.docker.volumes.get(vol_name)
+                volume.remove()
+                self.log.debug("Removed temporary volume: %s", vol_name)
+            except docker.errors.NotFound:
+                pass
+            except docker.errors.APIError:
+                # a container somehow still mounts the volume; leave it for the
+                # orphaned volume sweep on the next node startup
+                self.log.debug(
+                    "Could not remove volume %s, it may still be in use", vol_name
+                )
 
     def _set_database(self, databases: dict | list) -> None:
         """
@@ -638,6 +756,11 @@ class DockerManager(DockerBaseManager):
                     run_id=task.run_id, task_id=task.task_id, parent_id=task.parent_id
                 )
             )
+        # also cleanup any tasks that failed to start but may have partially
+        # created containers (e.g. helper containers)
+        while self.failed_tasks:
+            task = self.failed_tasks.pop()
+            task.cleanup()
         return run_ids_killed
 
     def cleanup(self) -> None:
@@ -738,6 +861,11 @@ class DockerManager(DockerBaseManager):
             write_run_context_file=self.write_run_context_file,
         )
 
+        # Reserve the tmp volume before the (potentially slow) image pull in
+        # task.run(). This guarantees the volume is not removed by a finishing
+        # sibling task while this task is still starting up.
+        self._reserve_volume(tmp_vol_name)
+
         # attempt to kick of the task. If it fails do to unknown reasons we try
         # again. If it fails permanently we add it to the failed tasks to be
         # handled by the speaking worker of the node
@@ -756,9 +884,11 @@ class DockerManager(DockerBaseManager):
                 self.log.exception(
                     f"Failed to start run {run_id} for an unknown reason. Retrying..."
                 )
+                task.cleanup()
                 time.sleep(1)  # add some time before retrying the next attempt
 
             except PermanentAlgorithmStartFail:
+                task.cleanup()
                 break
 
             attempts += 1
@@ -819,6 +949,9 @@ class DockerManager(DockerBaseManager):
             # Cleanup containers
             finished_task.cleanup()
 
+            # Remove temporary volume if no other task is using it
+            self._try_remove_tmp_volume(finished_task)
+
             # Retrieve results from file
             results = finished_task.get_results()
 
@@ -829,6 +962,8 @@ class DockerManager(DockerBaseManager):
         else:
             # at least one task failed to start
             finished_task = self.failed_tasks.pop()
+            finished_task.cleanup()
+            self._try_remove_tmp_volume(finished_task)
             logs = "Container failed. Check node logs for details"
             results = b""
 

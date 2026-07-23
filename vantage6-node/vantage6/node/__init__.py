@@ -466,9 +466,10 @@ class Node:
             )
             return  # prevent starting the run if there is no token
 
-        # create a temporary volume for each job_id
+        # temporary volume name for this job_id; the volume itself is created
+        # (and reference-counted) inside DockerManager.run() once the task is
+        # actually going to start
         vol_name = self.ctx.docker_temporary_volume_name(task["job_id"])
-        self.__docker.create_volume(vol_name)
 
         # For some reason, if the key 'input' consists of JSON, it is
         # automatically marshalled? This causes trouble, so we'll serialize it
