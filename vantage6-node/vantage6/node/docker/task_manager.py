@@ -283,6 +283,7 @@ class DockerTaskManager(DockerBaseManager):
         # `run_input` may be a clearer name in a future focused refactor.
         # The run-context helper already uses `run_input` terminology.
         self.docker_input = docker_input
+        self.tmp_vol_name = tmp_vol_name
         self.volumes = self._prepare_volumes(tmp_vol_name, token)
         self.log.debug("volumes: %s", self.volumes)
 
