@@ -569,6 +569,10 @@ class Node:
             except Exception as e:
                 self.log.error("Listening thread had an exception")
                 self.log.exception(e)
+            # wait() returns immediately while the socket is down, so without a
+            # pause this loop would spin at full speed until it is restored.
+            if not self.socketIO.connected:
+                time.sleep(ERROR_RETRY_DELAY_SECONDS)
 
     def __speaking_worker(self) -> None:
         """
@@ -1084,10 +1088,22 @@ class Node:
                 container_name=container_name, config_alias=alias
             )
 
-    def connect_to_socket(self) -> None:
+    def connect_to_socket(self, exit_on_failure: bool = True) -> bool:
         """
         Create long-lasting websocket connection with the server. The
         connection is used to receive status updates, such as new tasks.
+
+        Parameters
+        ----------
+        exit_on_failure : bool
+            Whether to terminate the node when the connection cannot be
+            established. This is the desired behaviour on startup, but not
+            when reconnecting a node that is already running.
+
+        Returns
+        -------
+        bool
+            Whether the connection was established.
         """
         debug_mode = self.debug.get("socketio", False)
         if debug_mode:
@@ -1129,7 +1145,10 @@ class Node:
                     "Could not connect to the websocket channels, do you have a "
                     "slow connection?"
                 )
-                exit(1)
+                if exit_on_failure:
+                    exit(1)
+                self.socketIO.shutdown()
+                return False
             self.log.debug("Waiting for socket connection...")
             time.sleep(1)
             i += 1
@@ -1142,6 +1161,7 @@ class Node:
             "Starting thread to ping the server to notify this node is online."
         )
         self.socketIO.start_background_task(self.__socket_ping_worker)
+        return True
 
     def __socket_ping_worker(self) -> None:
         """
@@ -1156,7 +1176,18 @@ class Node:
                 if self.socketIO.connected:
                     self.socketIO.emit("ping", namespace="/tasks")
                 else:
-                    self.log.debug("SocketIO is not connected, skipping ping")
+                    # The socket.io client gives up permanently when the server
+                    # closes the connection, and it reuses the authorization
+                    # header from the original connect, which by now may hold an
+                    # expired token. Rebuilding the connection solves both: it
+                    # picks up the current token and restores the session, which
+                    # is what marks this node online again.
+                    self.log.warning("Socket connection lost, reconnecting")
+                    if self.connect_to_socket(exit_on_failure=False):
+                        self.log.info("Socket connection restored")
+                        self.sync_task_queue_with_server()
+                        # connect_to_socket() started a new ping worker
+                        return
             except Exception:
                 self.log.exception("Ping thread had an exception")
             # Wait before sending next ping
