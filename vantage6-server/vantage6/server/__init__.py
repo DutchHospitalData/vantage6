@@ -975,11 +975,31 @@ def _abort_clients_with_unknown_session(socketio: SocketIO) -> None:
     engine in state 'disconnected', and python-socketio only reconnects while
     that state is 'connected', so a polite close would strand the node for good.
 
+    Three safeguards keep the rescue from becoming a disconnect loop, all three
+    added after the first version of this patch took the platform down:
+
+    1. A connection is aborted at most once. The first version also removed the
+       socket from ``server.eio.sockets``, after which every later abort attempt
+       raised KeyError and was swallowed, so the client was never disconnected
+       and merely had all of its events dropped, pings included. It went
+       offline and stayed there.
+    2. A connection must have been failing for GRACE_SECONDS before it is
+       aborted, so a client that is still completing its namespace handshake is
+       left alone.
+    3. If more than MAX_ABORTS connections are aborted within WINDOW_SECONDS the
+       guard disables itself. At that point the problem is not a handful of
+       stale clients but something systematic, and disconnecting everything
+       repeatedly makes it worse.
+
     Parameters
     ----------
     socketio : SocketIO
         The server socket.io instance to patch.
     """
+    grace_seconds = 30
+    window_seconds = 60
+    max_aborts = 20
+
     server = socketio.server
     original_handle_event = getattr(server, "_handle_event", None)
     if original_handle_event is None:
@@ -990,27 +1010,63 @@ def _abort_clients_with_unknown_session(socketio: SocketIO) -> None:
         )
         return
 
+    first_seen: dict[str, float] = {}
+    aborted: set[str] = set()
+    recent_aborts: list[float] = []
+    state = {"enabled": True}
+
     def handle_event(eio_sid, namespace, id, data):
         sid = server.manager.sid_from_eio_sid(eio_sid, namespace)
-        if not server.manager.is_connected(sid, namespace):
-            log.info(
-                "Client %s has no session on namespace %s, closing its "
-                "connection so it can identify itself again",
-                eio_sid,
-                namespace,
-            )
-            try:
-                socket = server.eio._get_socket(eio_sid)
-            except (KeyError, AttributeError):
-                pass
-            else:
-                socket.close(wait=False, abort=True)
-                server.eio.sockets.pop(eio_sid, None)
+        if server.manager.is_connected(sid, namespace):
+            first_seen.pop(eio_sid, None)
+            return original_handle_event(eio_sid, namespace, id, data)
+
+        if not state["enabled"] or eio_sid in aborted:
             return
-        return original_handle_event(eio_sid, namespace, id, data)
+
+        now = time.monotonic()
+        started = first_seen.setdefault(eio_sid, now)
+        if now - started < grace_seconds:
+            return
+
+        recent_aborts[:] = [t for t in recent_aborts if now - t < window_seconds]
+        if len(recent_aborts) >= max_aborts:
+            state["enabled"] = False
+            log.error(
+                "Disabling the unknown-session guard: %s clients were "
+                "disconnected within %s seconds, which points at a server-wide "
+                "problem rather than a few stale connections.",
+                len(recent_aborts),
+                window_seconds,
+            )
+            return
+
+        log.info(
+            "Client %s has had no session on namespace %s for %.0f seconds, "
+            "closing its connection so it can identify itself again",
+            eio_sid,
+            namespace,
+            now - started,
+        )
+        aborted.add(eio_sid)
+        recent_aborts.append(now)
+        first_seen.pop(eio_sid, None)
+        try:
+            socket = server.eio._get_socket(eio_sid)
+        except (KeyError, AttributeError):
+            return
+        # Deliberately no sockets.pop() here; engine.io owns that lifecycle and
+        # removing the socket ourselves is what broke the first version.
+        socket.close(wait=False, abort=True)
 
     server._handle_event = handle_event
-    log.info("Clients without a known session will be disconnected")
+    log.info(
+        "Clients without a known session will be disconnected once, after %s "
+        "seconds, up to %s times per %s seconds",
+        grace_seconds,
+        max_aborts,
+        window_seconds,
+    )
 
 
 def run_server(config: str, system_folders: bool = True) -> ServerApp:
