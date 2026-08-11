@@ -310,6 +310,8 @@ class ServerApp:
         namespace = DefaultSocketNamespace("/tasks", socketio, self.metrics)
         socketio.on_namespace(namespace)
 
+        _disconnect_clients_with_unknown_session(socketio)
+
         return socketio
 
     def configure_flask(self) -> None:
@@ -952,6 +954,57 @@ class ServerApp:
     #                         response["msg"],
     #                     )
     #             # else: store already exists, no need to couple it again
+
+
+def _disconnect_clients_with_unknown_session(socketio: SocketIO) -> None:
+    """
+    Close connections the server has no session for.
+
+    A client can end up with a live transport while the server no longer holds a
+    session for it, for example after the websocket was closed server-side but
+    the TCP connection stayed up. python-socketio then drops every incoming
+    event with "None is not connected to namespace", before any handler runs.
+    That includes the ping handler, which is what would mark the node online
+    again, so the client keeps sending into the void and never recovers.
+
+    Closing the underlying connection turns this into an ordinary disconnect.
+    The client reconnects, identifies itself and rejoins its rooms, without
+    needing any change on the client side.
+
+    This overrides a private method of python-socketio (pinned at 5.16.4 through
+    flask-socketio 5.6.1). If that internal changes, the override is skipped and
+    the old behaviour returns.
+
+    Parameters
+    ----------
+    socketio: SocketIO
+        The Flask-SocketIO instance to patch.
+    """
+    server = getattr(socketio, "server", None)
+    original_handle_event = getattr(server, "_handle_event", None)
+    if server is None or original_handle_event is None:
+        log.warning(
+            "Could not install the unknown-session handler: clients whose "
+            "session is gone will keep sending events that go nowhere"
+        )
+        return
+
+    def handle_event(eio_sid, namespace, id, data):
+        sid = server.manager.sid_from_eio_sid(eio_sid, namespace)
+        if not server.manager.is_connected(sid, namespace):
+            log.info(
+                "Received an event on %s for a session that no longer exists; "
+                "closing the connection so the client reconnects",
+                namespace,
+            )
+            try:
+                server.eio.disconnect(eio_sid)
+            except Exception:
+                log.exception("Failed to close connection %s", eio_sid)
+            return
+        return original_handle_event(eio_sid, namespace, id, data)
+
+    server._handle_event = handle_event
 
 
 def run_server(config: str, system_folders: bool = True) -> ServerApp:

@@ -62,6 +62,7 @@ from vantage6.node.globals import (
     TIME_LIMIT_RETRY_CONNECT_NODE,
     TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET,
     DEFAULT_SOCKET_RECONNECTION_DELAY_MAX,
+    ERROR_RETRY_DELAY_SECONDS,
 )
 from vantage6.common.client.node_client import NodeClient
 from vantage6.node import proxy_server
@@ -641,6 +642,11 @@ class Node:
                 )
             except Exception:
                 self.log.exception("Speaking thread had an exception")
+                # Back off before looping again. `get_result()` normally blocks
+                # until a result is available, but if anything above it raises
+                # the loop restarts immediately, and the node then hammers the
+                # server as fast as it can.
+                time.sleep(ERROR_RETRY_DELAY_SECONDS)
 
     def __print_connection_error_logs(self):
         """Print error message when node cannot find the server"""

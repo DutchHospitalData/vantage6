@@ -38,6 +38,11 @@ TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET = 60
 # would also need a higher `randomization_factor` to spread the load out.
 DEFAULT_SOCKET_RECONNECTION_DELAY_MAX = 60
 
+# Pause after an unexpected error in a worker loop that talks to the server.
+# Without it a failing loop retries as fast as the CPU allows, which turns one
+# broken run into a stream of requests.
+ERROR_RETRY_DELAY_SECONDS = 10
+
 #
 #    VPN CONFIGURATION RELATED CONSTANTS
 #
