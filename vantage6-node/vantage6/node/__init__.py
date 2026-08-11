@@ -458,10 +458,18 @@ class Node:
             self.log.error(
                 "Container token could not be obtained: %s", token.get("msg")
             )
+            # `finished_at` must be set explicitly: the server overwrites it with
+            # whatever the payload contains, and it selects open runs on
+            # `finished_at IS NULL`. Without it the run stays open, is handed out
+            # again on the next sync, and the node keeps asking for a token that
+            # can never be issued.
             self.client.run.patch(
                 id_=task_incl_run["id"],
                 data={
                     "status": TaskStatus.FAILED,
+                    "finished_at": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
                     "log": "Could not obtain algorithm container token",
                 },
             )
