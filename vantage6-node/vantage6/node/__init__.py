@@ -61,6 +61,7 @@ from vantage6.node.globals import (
     SLEEP_BTWN_NODE_LOGIN_TRIES,
     TIME_LIMIT_RETRY_CONNECT_NODE,
     TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET,
+    DEFAULT_SOCKET_RECONNECTION_DELAY_MAX,
 )
 from vantage6.common.client.node_client import NodeClient
 from vantage6.node import proxy_server
@@ -1077,8 +1078,24 @@ class Node:
         debug_mode = self.debug.get("socketio", False)
         if debug_mode:
             self.log.debug("Debug mode enabled for socketio")
+
+        # Nodes retry forever, but the delay between attempts is capped. With
+        # python-socketio's default cap of 5 seconds a fleet of nodes keeps a
+        # struggling server under constant reconnect load, which makes an
+        # outage harder to recover from.
+        reconnection_delay_max = self.config.get("socketio", {}).get(
+            "reconnection_delay_max", DEFAULT_SOCKET_RECONNECTION_DELAY_MAX
+        )
+        self.log.debug(
+            "Websocket reconnect backoff capped at %s seconds",
+            reconnection_delay_max,
+        )
+
         self.socketIO = SocketIO(
-            request_timeout=60, logger=debug_mode, engineio_logger=debug_mode
+            request_timeout=60,
+            reconnection_delay_max=reconnection_delay_max,
+            logger=debug_mode,
+            engineio_logger=debug_mode,
         )
 
         self.socketIO.register_namespace(NodeTaskNamespace("/tasks"))

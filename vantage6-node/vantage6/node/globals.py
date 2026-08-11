@@ -26,6 +26,18 @@ TIME_LIMIT_RETRY_CONNECT_NODE = 60 * 60 * 24 * 7  # i.e. 1 week
 # constant for waiting for the initial websocket connection
 TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET = 60
 
+# Upper bound for the exponential backoff between websocket reconnect attempts.
+# python-socketio defaults to 5 seconds, which means a fleet of nodes keeps
+# hammering a struggling server roughly every 5 seconds indefinitely. Nodes
+# still retry forever, just less aggressively. Override per node with
+# `socketio.reconnection_delay_max` in the node configuration file.
+#
+# Note that python-socketio adds only a fixed +/- 0.5 second of jitter on top
+# of this delay, so reconnect attempts stay roughly synchronised across a
+# collaboration. That is harmless for a handful of nodes, but a large fleet
+# would also need a higher `randomization_factor` to spread the load out.
+DEFAULT_SOCKET_RECONNECTION_DELAY_MAX = 60
+
 #
 #    VPN CONFIGURATION RELATED CONSTANTS
 #
