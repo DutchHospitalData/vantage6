@@ -310,6 +310,8 @@ class ServerApp:
         namespace = DefaultSocketNamespace("/tasks", socketio, self.metrics)
         socketio.on_namespace(namespace)
 
+        _abort_clients_with_unknown_session(socketio)
+
         return socketio
 
     def configure_flask(self) -> None:
@@ -952,6 +954,63 @@ class ServerApp:
     #                         response["msg"],
     #                     )
     #             # else: store already exists, no need to couple it again
+
+
+def _abort_clients_with_unknown_session(socketio: SocketIO) -> None:
+    """
+    Close connections from clients the server can no longer identify.
+
+    TEMPORARY MEASURE, NOT FOR MERGE. A node can end up with a live transport
+    while the server has no session for it. Every event it sends is then dropped
+    by python-socketio before any handler runs, including the ping that would
+    mark the node online again, so it stays offline and keeps sending forever.
+    The node cannot recover on its own because it still considers itself
+    connected.
+
+    The proper fix is in the node, which should reconnect when its socket is
+    down. This exists only to rescue nodes that already run older code and
+    cannot be updated on demand.
+
+    The transport is aborted rather than closed. A clean close leaves the client
+    engine in state 'disconnected', and python-socketio only reconnects while
+    that state is 'connected', so a polite close would strand the node for good.
+
+    Parameters
+    ----------
+    socketio : SocketIO
+        The server socket.io instance to patch.
+    """
+    server = socketio.server
+    original_handle_event = getattr(server, "_handle_event", None)
+    if original_handle_event is None:
+        log.warning(
+            "Cannot install the unknown-session guard: this version of "
+            "python-socketio has no _handle_event. Stale clients will not be "
+            "disconnected."
+        )
+        return
+
+    def handle_event(eio_sid, namespace, id, data):
+        sid = server.manager.sid_from_eio_sid(eio_sid, namespace)
+        if not server.manager.is_connected(sid, namespace):
+            log.info(
+                "Client %s has no session on namespace %s, closing its "
+                "connection so it can identify itself again",
+                eio_sid,
+                namespace,
+            )
+            try:
+                socket = server.eio._get_socket(eio_sid)
+            except (KeyError, AttributeError):
+                pass
+            else:
+                socket.close(wait=False, abort=True)
+                server.eio.sockets.pop(eio_sid, None)
+            return
+        return original_handle_event(eio_sid, namespace, id, data)
+
+    server._handle_event = handle_event
+    log.info("Clients without a known session will be disconnected")
 
 
 def run_server(config: str, system_folders: bool = True) -> ServerApp:
