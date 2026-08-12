@@ -117,6 +117,59 @@ leaves the event loop being blocked as the working explanation.
 node side. Until the nodes run it, a node that loses its session stays gone
 until someone restarts it, however healthy the server is.
 
+Silence is a diagnosis of its own
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A log full of errors is easier to read than a log with nothing in it, so this
+case is worth spelling out. **The absence of traffic is a stronger signal than
+the presence of errors**, because each of the failure modes on this page leaves
+a distinctive trace, and no trace at all rules all of them out.
+
+After a mass drop, count what each node still does:
+
+.. code-block:: bash
+
+    # HTTP: does the node still poll for work?
+    grep -c "state=open&node_id=<id>" server.log
+
+    # HTTP: does it still try to authenticate?
+    grep -c "login as node '<id>'" server.log
+
+    # websocket: does it send events the server cannot place?
+    grep -c "session that no longer exists" server.log
+
+Interpret the combination:
+
+.. list-table::
+    :header-rows: 1
+    :widths: 30 70
+
+    * - What you see
+      - What it means
+    * - Repeated logins, or repeated ``state=open`` polls
+      - The node is alive and trying. Its HTTP path works, so the problem is
+        limited to the websocket. This is the case the fixes here address.
+    * - No HTTP, but ``session that no longer exists`` keeps appearing
+      - A ghost session. The node believes it is connected and is emitting into
+        the void. Section 2.
+    * - Nothing at all, from any of the three
+      - The node is not running, or cannot reach the server. Nothing on the
+        server side can help, because every recovery path in this codebase is
+        triggered by something the node sends.
+
+That last row is the one that catches people out. We hit it: over two hours,
+ten train nodes produced not a single request, not one login attempt, and not
+one event the server had to reject, while a test node on the same server
+connected and worked normally. A server that is healthy and quiet, with a task
+sitting in ``pending``, means the work has to happen at the nodes.
+
+.. important::
+
+    Every recovery mechanism described on this page is reactive. The server can
+    only close a connection that exists, and the node can only reconnect if its
+    process is running. Neither helps a node that has stopped. Before reaching
+    for a server-side fix, confirm the node is actually alive and talking.
+
 2. A node that thinks it is connected while the server disagrees
 ----------------------------------------------------------------
 
@@ -142,6 +195,26 @@ socket is actually connected and reconnects when it is not.
 **Important** that fix lives in the node, so it does nothing for a node that is
 already stuck and cannot be redeployed on demand. See section 4 for the
 stopgap.
+
+**The two halves only work together.** Neither side recovers a ghost session on
+its own, and it is worth knowing which link breaks if you deploy only one:
+
+1. The node's transport is up, so its client reports itself as connected and
+   keeps emitting pings. Nothing in the node notices anything is wrong.
+2. The server intercepts an incoming event it cannot place and closes the
+   underlying connection. **This is event driven**: it fires only because the
+   node sent something. A silent node is never reached.
+3. The node's client now reports itself as disconnected. It does not reconnect
+   by itself, for the reason given at the end of this page: a clean server-side
+   close leaves the client engine in a state where it treats the disconnect as
+   final.
+4. The node's ping worker sees the disconnected state, rebuilds the connection
+   with a fresh token, rejoins its rooms and resynchronises its task queue.
+
+Deploy only the server half and step 4 never happens: an old node ends its days
+logging that it is skipping pings. Deploy only the node half and step 2 never
+happens, so the node never learns it should reconnect. Both halves, and a node
+process that is actually running, are required.
 
 3. A run that is handed out forever
 -----------------------------------
