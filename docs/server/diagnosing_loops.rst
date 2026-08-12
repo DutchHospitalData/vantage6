@@ -70,6 +70,53 @@ triggers the first stall, which is still open. Ours coincided with
 ``no PONG received in 3 seconds`` and multi-megabyte blob transfers happening at
 the same moment.
 
+.. _server-node-mass-drop:
+
+Recognising a mass drop, and dating it
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When every node goes offline at once the useful question is not *that* they
+left but *when*, because the shape of the answer names the cause. Ask the API
+rather than the UI, which only shows the current state:
+
+.. code-block:: python
+
+    res = client.node.list(collaboration=<id>, per_page=100)
+    for n in sorted(res["data"], key=lambda x: str(x["last_seen"])):
+        print(n["id"], n["status"], n["last_seen"], n["name"])
+
+Read the spread between the first and the last ``last_seen``:
+
+* **All within a second or two.** The server dropped them. Look at the server
+  process itself: a restart, a redeploy, or a crash.
+* **Spread over several minutes.** A ping-timeout cascade. The nodes died one
+  by one as each missed its own ping deadline, which points at something that
+  blocked the server's event loop for a while rather than something that killed
+  it.
+* **Spread over hours, unrelated times.** Not one incident. Treat each node
+  separately.
+
+Then line the window up against what the platform was doing. A cascade that
+starts immediately after a large task finishes, while results are being
+collected and pushed to blob storage, is the signature described above.
+
+We observed exactly this: ten of ten nodes left over a six minute window that
+began about two minutes after a training task completed and ended seconds
+before the next one was submitted. The server stayed responsive throughout, at
+roughly 30 ms on ``/api/version``, which rules out the server being down and
+leaves the event loop being blocked as the working explanation.
+
+.. warning::
+
+    A responsive server does not mean a healthy platform. Check node presence
+    and whether a submitted task is actually being picked up. A task sitting in
+    ``pending`` with no ``started_at`` while ``/api/version`` answers instantly
+    is the combination to watch for.
+
+**Why they do not come back on their own** is section 2: the reconnect fix is
+node side. Until the nodes run it, a node that loses its session stays gone
+until someone restarts it, however healthy the server is.
+
 2. A node that thinks it is connected while the server disagrees
 ----------------------------------------------------------------
 
