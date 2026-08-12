@@ -121,8 +121,12 @@ because the task is complete, patches again, and so on.
     curl -s -H "Authorization: Bearer $TOKEN" $SERVER/api/run/<run_id> \
       | jq '{id, status, started_at, finished_at}'
 
-``status`` set and ``finished_at: null`` is the signature. A ``started_at`` in
-the very recent past for an old task means it is still going round.
+``status`` set and ``finished_at: null`` is the signature.
+
+Note that this one usually arrives in bursts rather than as a continuous loop.
+The node picks up its open runs on each sync cycle, fails on the same one, and
+then goes quiet until the next cycle or a restart. Poll ``started_at`` a minute
+apart: if it does not move, you are between bursts, not fixed.
 
 **Fix** shipped in this PR, node side: send ``finished_at`` explicitly when
 failing a run.
