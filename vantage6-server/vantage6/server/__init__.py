@@ -334,9 +334,16 @@ class ServerApp:
 
         # If no secret is set in the config file, one is generated. This
         # implies that all (even refresh) tokens will be invalidated on restart
-        self.app.config["JWT_SECRET_KEY"] = self.ctx.config.get(
-            "jwt_secret_key", str(uuid.uuid4())
-        )
+        jwt_secret_key = self.ctx.config.get("jwt_secret_key")
+        if not jwt_secret_key:
+            log.warning(
+                "No 'jwt_secret_key' in the server configuration: generating a "
+                "random one. All tokens are invalidated on every restart, and "
+                "if the server runs more than one worker, tokens issued by one "
+                "worker are rejected by the others. Set it in production."
+            )
+            jwt_secret_key = str(uuid.uuid4())
+        self.app.config["JWT_SECRET_KEY"] = jwt_secret_key
 
         # Default expiration time
         token_expiry_seconds = self._get_jwt_expiration_seconds(

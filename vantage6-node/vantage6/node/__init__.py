@@ -40,6 +40,7 @@ from docker import DockerClient
 from pathlib import Path
 from threading import Event, Lock, Thread
 from socketio import Client as SocketIO
+from socketio.exceptions import ConnectionError as SocketIOConnectionError
 from gevent.pywsgi import WSGIServer
 from enum import Enum
 
@@ -64,6 +65,7 @@ from vantage6.node.globals import (
     DEFAULT_SOCKET_RECONNECTION_DELAY_MAX,
     DEFAULT_SOCKET_RANDOMIZATION_FACTOR,
     SOCKET_RECONNECT_RETRY_DELAY_SECONDS,
+    SOCKET_RECONNECT_RETRY_DELAY_MAX_SECONDS,
     ERROR_RETRY_DELAY_SECONDS,
 )
 from vantage6.common.client.node_client import NodeClient
@@ -1188,11 +1190,26 @@ class Node:
         self.socketIO.register_namespace(NodeTaskNamespace("/tasks"))
         NodeTaskNamespace.node_worker_ref = self
 
-        self.socketIO.connect(
-            url=f"{self.client.host}:{self.client.port}",
-            headers=self.client.headers,
-            wait=False,
-        )
+        try:
+            self.socketIO.connect(
+                url=f"{self.client.host}:{self.client.port}",
+                headers=self.client.headers,
+                wait=False,
+            )
+        except SocketIOConnectionError as exc:
+            # Typically a 502 from the proxy while the server is down or
+            # restarting. Report it plainly: the caller decides whether to give
+            # up or to retry later.
+            self.log.error(
+                "Could not open a websocket connection to %s:%s: %s",
+                self.client.host,
+                self.client.port,
+                exc,
+            )
+            if exit_on_failure:
+                exit(1)
+            self.socketIO.shutdown()
+            return False
 
         # Log the outcome
         i = 0
@@ -1244,11 +1261,13 @@ class Node:
         # Wait for the socket to be connected to the namespaces on startup
         self.__stop_ping.wait(5)
 
+        reconnect_delay = SOCKET_RECONNECT_RETRY_DELAY_SECONDS
         while not self.__stop_ping.is_set():
             delay = PING_INTERVAL_SECONDS
             try:
                 if self.__is_socket_ready():
                     self.socketIO.emit("ping", namespace="/tasks")
+                    reconnect_delay = SOCKET_RECONNECT_RETRY_DELAY_SECONDS
                 else:
                     # The socket.io client gives up permanently when the server
                     # closes the connection, and it reuses the authorization
@@ -1260,8 +1279,15 @@ class Node:
                     if self.connect_to_socket(exit_on_failure=False):
                         self.log.info("Socket connection restored")
                         self.sync_task_queue_with_server()
+                        reconnect_delay = SOCKET_RECONNECT_RETRY_DELAY_SECONDS
                     else:
-                        delay = self.__reconnect_retry_delay()
+                        # Jittered, so that the nodes of a collaboration do not
+                        # retry in lockstep after a server outage.
+                        delay = reconnect_delay * random.uniform(0.5, 1.5)
+                        reconnect_delay = min(
+                            reconnect_delay * 2,
+                            SOCKET_RECONNECT_RETRY_DELAY_MAX_SECONDS,
+                        )
                         self.log.warning(
                             "Reconnecting failed, retrying in %.0f seconds", delay
                         )
@@ -1269,19 +1295,6 @@ class Node:
                 self.log.exception("Ping thread had an exception")
             # Wait before sending next ping
             self.__stop_ping.wait(delay)
-
-    @staticmethod
-    def __reconnect_retry_delay() -> float:
-        """
-        Delay before the next attempt to rebuild the websocket connection.
-
-        Returns
-        -------
-        float
-            The delay in seconds, jittered to keep the nodes of a
-            collaboration from retrying in lockstep.
-        """
-        return SOCKET_RECONNECT_RETRY_DELAY_SECONDS * random.uniform(0.5, 1.5)
 
     def run_forever(self) -> None:
         """Keep checking queue for incoming tasks (and execute them)."""
