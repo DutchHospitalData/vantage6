@@ -76,7 +76,12 @@ from vantage6.server.globals import (
     MIN_REFRESH_TOKEN_EXPIRY_DELTA,
     SERVER_MODULE_NAME,
 )
-from vantage6.server.websockets import DefaultSocketNamespace
+from vantage6.server.websockets import (
+    DefaultSocketNamespace,
+    emit_node_status_change,
+    get_node_info,
+    get_node_rooms,
+)
 from vantage6.server.default_roles import get_default_roles, DefaultRole
 from vantage6.server.hashedpassword import HashedPassword
 from vantage6.server.controller import cleanup
@@ -870,8 +875,16 @@ class ServerApp:
                 online_status_nodes = db.Node.get_online_nodes()
                 for node in online_status_nodes:
                     if node.last_seen.replace(tzinfo=dt.timezone.utc) < before_wait:
+                        # Read these before save(), which expires the attributes
+                        node_info = get_node_info(node)
+                        node_rooms = get_node_rooms(node)
                         node.status = AuthStatus.OFFLINE.value
                         node.save()
+                        # Such a node never disconnected cleanly, so the socket
+                        # disconnect handler did not alert anyone.
+                        emit_node_status_change(
+                            self.socketio, node_info, node_rooms, online=False
+                        )
             except Exception as e:
                 log.exception("Node-status thread encountered an exception: %s", e)
                 time.sleep(PING_INTERVAL_SECONDS)

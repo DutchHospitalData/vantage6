@@ -32,11 +32,18 @@ TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET = 60
 # still retry forever, just less aggressively. Override per node with
 # `socketio.reconnection_delay_max` in the node configuration file.
 #
-# Note that python-socketio adds only a fixed +/- 0.5 second of jitter on top
-# of this delay, so reconnect attempts stay roughly synchronised across a
-# collaboration. That is harmless for a handful of nodes, but a large fleet
-# would also need a higher `randomization_factor` to spread the load out.
+# Note that python-socketio adds only a fixed amount of jitter on top of this
+# delay, so reconnect attempts stay roughly synchronised across a
+# collaboration. See the randomization factor below.
 DEFAULT_SOCKET_RECONNECTION_DELAY_MAX = 60
+
+# Jitter that python-socketio adds to each reconnect delay, in seconds (the
+# delay is offset by +/- this value). Raising it spreads the reconnects of a
+# large fleet out over time, at the cost of a slower recovery. Keep it well
+# below `reconnection_delay` (1 second), or the first attempts end up with a
+# negative delay and retry immediately. Override per node with
+# `socketio.randomization_factor`.
+DEFAULT_SOCKET_RANDOMIZATION_FACTOR = 0.5
 
 # Delay before the node rebuilds the websocket connection again after a failed
 # attempt. This is deliberately much longer than the ping interval: a node that

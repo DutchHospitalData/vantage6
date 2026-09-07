@@ -38,7 +38,7 @@ import pynvml
 from docker import DockerClient
 
 from pathlib import Path
-from threading import Thread
+from threading import Event, Lock, Thread
 from socketio import Client as SocketIO
 from gevent.pywsgi import WSGIServer
 from enum import Enum
@@ -62,6 +62,7 @@ from vantage6.node.globals import (
     TIME_LIMIT_RETRY_CONNECT_NODE,
     TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET,
     DEFAULT_SOCKET_RECONNECTION_DELAY_MAX,
+    DEFAULT_SOCKET_RANDOMIZATION_FACTOR,
     SOCKET_RECONNECT_RETRY_DELAY_SECONDS,
     ERROR_RETRY_DELAY_SECONDS,
 )
@@ -122,6 +123,9 @@ class Node:
         self.debug: dict = self.config.get("debug", {})
         self.queue = queue.Queue()
         self._using_encryption = None
+        # Serialises the threads that may rebuild the websocket connection
+        self.__socket_lock = Lock()
+        self.__stop_ping = Event()
 
         # initialize Node connection to the server
         self.client = NodeClient(
@@ -197,6 +201,15 @@ class Node:
         # Create a long-lasting websocket connection.
         self.log.debug("Creating websocket connection with the server")
         self.connect_to_socket()
+
+        # One ping worker for the lifetime of the node: it outlives the
+        # individual connections, so reconnects cannot leave the node without a
+        # ping thread or with several of them.
+        self.log.debug(
+            "Starting thread to ping the server to notify this node is online."
+        )
+        t = Thread(target=self.__socket_ping_worker, daemon=True)
+        t.start()
 
         # Connect the node to the isolated algorithm network *only* if we're
         # running in a docker container.
@@ -1106,20 +1119,54 @@ class Node:
         bool
             Whether the connection was established.
         """
+        # The ping worker and the token handlers may all decide to reconnect at
+        # the same moment. Serialise them: without this they build connections
+        # that immediately supersede each other, and the server sees a burst of
+        # connects from a single node.
+        with self.__socket_lock:
+            if self.__is_socket_ready():
+                self.log.debug("Socket was already reconnected by another thread")
+                return True
+            return self.__create_socket_connection(exit_on_failure)
+
+    def __create_socket_connection(self, exit_on_failure: bool) -> bool:
+        """
+        Build the websocket connection. Callers must hold ``__socket_lock``.
+
+        Parameters
+        ----------
+        exit_on_failure : bool
+            Whether to terminate the node when the connection cannot be
+            established.
+
+        Returns
+        -------
+        bool
+            Whether the connection was established.
+        """
         debug_mode = self.debug.get("socketio", False)
         if debug_mode:
             self.log.debug("Debug mode enabled for socketio")
+
+        socketio_config = self.config.get("socketio", {})
 
         # Nodes retry forever, but the delay between attempts is capped. With
         # python-socketio's default cap of 5 seconds a fleet of nodes keeps a
         # struggling server under constant reconnect load, which makes an
         # outage harder to recover from.
-        reconnection_delay_max = self.config.get("socketio", {}).get(
+        reconnection_delay_max = socketio_config.get(
             "reconnection_delay_max", DEFAULT_SOCKET_RECONNECTION_DELAY_MAX
         )
+        # Spread the reconnect attempts of a collaboration out over time, so
+        # that the nodes do not all hit the server in the same instant.
+        randomization_factor = socketio_config.get(
+            "randomization_factor", DEFAULT_SOCKET_RANDOMIZATION_FACTOR
+        )
         self.log.debug(
-            "Websocket reconnect backoff capped at %s seconds",
+            "Websocket reconnect backoff capped at %s seconds with a "
+            "randomization factor of %s",
             reconnection_delay_max,
+            randomization_factor,
         )
 
         # A half-open client is still attached to the server, so drop it before
@@ -1133,6 +1180,7 @@ class Node:
         self.socketIO = SocketIO(
             request_timeout=60,
             reconnection_delay_max=reconnection_delay_max,
+            randomization_factor=randomization_factor,
             logger=debug_mode,
             engineio_logger=debug_mode,
         )
@@ -1165,11 +1213,6 @@ class Node:
         self.log.info(
             f"Connected to host={self.client.host} on port={self.client.port}"
         )
-
-        self.log.debug(
-            "Starting thread to ping the server to notify this node is online."
-        )
-        self.socketIO.start_background_task(self.__socket_ping_worker)
         return True
 
     def __is_socket_ready(self) -> bool:
@@ -1192,12 +1235,17 @@ class Node:
     def __socket_ping_worker(self) -> None:
         """
         Send ping messages periodically to the server over the socketIO
-        connection to notify the server that this node is online
+        connection to notify the server that this node is online.
+
+        This worker is started once and outlives the individual websocket
+        connections, so that a reconnect never leaves the node with zero or
+        with multiple ping threads.
         """
         # Wait for the socket to be connected to the namespaces on startup
-        time.sleep(5)
+        self.__stop_ping.wait(5)
 
-        while True:
+        while not self.__stop_ping.is_set():
+            delay = PING_INTERVAL_SECONDS
             try:
                 if self.__is_socket_ready():
                     self.socketIO.emit("ping", namespace="/tasks")
@@ -1212,18 +1260,28 @@ class Node:
                     if self.connect_to_socket(exit_on_failure=False):
                         self.log.info("Socket connection restored")
                         self.sync_task_queue_with_server()
-                        # connect_to_socket() started a new ping worker
-                        return
-                    self.log.warning(
-                        "Reconnecting failed, retrying in %s seconds",
-                        SOCKET_RECONNECT_RETRY_DELAY_SECONDS,
-                    )
-                    time.sleep(SOCKET_RECONNECT_RETRY_DELAY_SECONDS)
-                    continue
+                    else:
+                        delay = self.__reconnect_retry_delay()
+                        self.log.warning(
+                            "Reconnecting failed, retrying in %.0f seconds", delay
+                        )
             except Exception:
                 self.log.exception("Ping thread had an exception")
             # Wait before sending next ping
-            time.sleep(PING_INTERVAL_SECONDS)
+            self.__stop_ping.wait(delay)
+
+    @staticmethod
+    def __reconnect_retry_delay() -> float:
+        """
+        Delay before the next attempt to rebuild the websocket connection.
+
+        Returns
+        -------
+        float
+            The delay in seconds, jittered to keep the nodes of a
+            collaboration from retrying in lockstep.
+        """
+        return SOCKET_RECONNECT_RETRY_DELAY_SECONDS * random.uniform(0.5, 1.5)
 
     def run_forever(self) -> None:
         """Keep checking queue for incoming tasks (and execute them)."""
@@ -1366,6 +1424,9 @@ class Node:
         self.log.info("Cleaning up node...")
 
         if hasattr(self, "socketIO") and self.socketIO:
+            # Stop the ping worker first, otherwise it emits into a socket that
+            # is already being torn down
+            self.__stop_ping.set()
             try:
                 self.socketIO.disconnect()
             except Exception:
