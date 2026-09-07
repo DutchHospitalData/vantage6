@@ -26,6 +26,38 @@ TIME_LIMIT_RETRY_CONNECT_NODE = 60 * 60 * 24 * 7  # i.e. 1 week
 # constant for waiting for the initial websocket connection
 TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET = 60
 
+# Upper bound for the exponential backoff between websocket reconnect attempts.
+# python-socketio defaults to 5 seconds, which means a fleet of nodes keeps
+# hammering a struggling server roughly every 5 seconds indefinitely. Nodes
+# still retry forever, just less aggressively. Override per node with
+# `socketio.reconnection_delay_max` in the node configuration file.
+#
+# Note that python-socketio adds only a fixed amount of jitter on top of this
+# delay, so reconnect attempts stay roughly synchronised across a
+# collaboration. See the randomization factor below.
+DEFAULT_SOCKET_RECONNECTION_DELAY_MAX = 60
+
+# Jitter that python-socketio adds to each reconnect delay, in seconds (the
+# delay is offset by +/- this value). Raising it spreads the reconnects of a
+# large fleet out over time, at the cost of a slower recovery. Keep it well
+# below `reconnection_delay` (1 second), or the first attempts end up with a
+# negative delay and retry immediately. Override per node with
+# `socketio.randomization_factor`.
+DEFAULT_SOCKET_RANDOMIZATION_FACTOR = 0.5
+
+# Delay before the node rebuilds the websocket connection again after a failed
+# attempt. It doubles up to the maximum, so that a server that is briefly
+# unreachable is picked up quickly, while a node that can never (re)join the
+# /tasks namespace - e.g. because the server rejects it - does not keep opening
+# fresh connections every ping interval indefinitely.
+SOCKET_RECONNECT_RETRY_DELAY_SECONDS = 30
+SOCKET_RECONNECT_RETRY_DELAY_MAX_SECONDS = 300
+
+# Pause after an unexpected error in a worker loop that talks to the server.
+# Without it a failing loop retries as fast as the CPU allows, which turns one
+# broken run into a stream of requests.
+ERROR_RETRY_DELAY_SECONDS = 10
+
 #
 #    VPN CONFIGURATION RELATED CONSTANTS
 #

@@ -4,7 +4,7 @@ import datetime as dt
 
 from flask import request, session
 from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
-from flask_socketio import Namespace, emit, join_room, leave_room
+from flask_socketio import Namespace, emit, join_room, leave_room, rooms
 
 from vantage6.common import logger_name
 from vantage6.common.globals import AuthStatus
@@ -16,6 +16,75 @@ from vantage6.server.model.rule import Operation, Scope
 from vantage6.server.model.base import DatabaseSessionManager
 
 ALL_NODES_ROOM = "all_nodes"
+
+
+def get_node_info(node: Authenticatable) -> dict:
+    """
+    Materialize the node fields needed for status events.
+
+    Read these while the instance is still attached to its database session.
+    ``node.save()`` commits, which expires the attributes, and vantage6's
+    scoped session can be cleared before a later lazy load, which would raise
+    ``DetachedInstanceError``.
+
+    Parameters
+    ----------
+    node: Authenticatable
+        The node SQLAlchemy object
+
+    Returns
+    -------
+    dict
+        Plain values describing the node.
+    """
+    return {"id": node.id, "name": node.name, "org_id": node.organization.id}
+
+
+def get_node_rooms(node: Authenticatable) -> list[str]:
+    """
+    The websocket rooms that a node belongs to.
+
+    Parameters
+    ----------
+    node: Authenticatable
+        The node SQLAlchemy object
+
+    Returns
+    -------
+    list[str]
+        Names of the rooms.
+    """
+    return [
+        ALL_NODES_ROOM,
+        f"collaboration_{node.collaboration_id}",
+        f"collaboration_{node.collaboration_id}_organization_{node.organization_id}",
+    ]
+
+
+def emit_node_status_change(
+    socketio, node_info: dict, target_rooms: list[str], online: bool
+) -> None:
+    """
+    Alert the administrators and the collaboration that a node changed status.
+
+    Parameters
+    ----------
+    socketio: flask_socketio.SocketIO
+        The root socketio instance. Required because events cannot be sent
+        outside the current namespace from a namespace instance.
+    node_info: dict
+        Plain node values, materialized while the ORM object was attached
+    target_rooms: list[str]
+        Rooms to send the status update to. Passed in explicitly because on
+        disconnect the client has already left its rooms, and because the
+        socket session cannot be relied upon at that point.
+    online: bool
+        Whether the node is coming online or going offline
+    """
+    socketio.emit("node-status-changed", namespace="/admin")
+    event = "node-online" if online else "node-offline"
+    for room in target_rooms:
+        socketio.emit(event, node_info, namespace="/tasks", room=room)
 
 
 class DefaultSocketNamespace(Namespace):
@@ -87,12 +156,6 @@ class DefaultSocketNamespace(Namespace):
         auth.status = AuthStatus.ONLINE.value
         auth.save()
 
-        # It appears to be necessary to use the root socketio instance
-        # otherwise events cannot be sent outside the current namespace.
-        # In this case, only events to '/tasks' can be emitted otherwise.
-        if auth.type == "node":
-            self.socketio.emit("node-status-changed", namespace="/admin")
-
         # define socket-session variables.
         session.type = auth.type
         session.name = auth.username if session.type == "user" else auth.name
@@ -105,7 +168,9 @@ class DefaultSocketNamespace(Namespace):
             emit("sync", room=request.sid)
             # Add node to rooms and alert other clients of that
             self._add_node_to_rooms(auth)
-            self.__alert_node_status(online=True, node=auth)
+            emit_node_status_change(
+                self.socketio, get_node_info(auth), session.rooms, online=True
+            )
         elif session.type == "user":
             self._add_user_to_rooms(auth)
 
@@ -126,12 +191,7 @@ class DefaultSocketNamespace(Namespace):
             Node that is to be added to the rooms
         """
         # node join rooms for all nodes and rooms for their collaboration
-        session.rooms.append(ALL_NODES_ROOM)
-        session.rooms.append(f"collaboration_{node.collaboration_id}")
-        session.rooms.append(
-            f"collaboration_{node.collaboration_id}_organization_"
-            f"{node.organization_id}"
-        )
+        session.rooms.extend(get_node_rooms(node))
 
     @staticmethod
     def _add_user_to_rooms(user: Authenticatable) -> None:
@@ -163,42 +223,92 @@ class DefaultSocketNamespace(Namespace):
                     f"collaboration_{collab.id}_organization_" f"{user.organization.id}"
                 )
 
-    def on_disconnect(self) -> None:
+    def on_disconnect(self, reason: str | None = None) -> None:
         """
         Client that disconnects is removed from all rooms they were in.
 
         If nodes disconnect, their status is also set to offline and users may
         be alerted to that. Also, any information on the node (e.g.
         configuration) is removed from the database.
+
+        The socket session may no longer be populated at this point, for
+        instance when the server restarted while the client was connected. The
+        rooms are therefore read from Socket.IO rather than from ``session``,
+        and the whole body is guarded so that Socket.IO always gets to run its
+        own cleanup. If this handler raises, python-socketio never reaches
+        ``manager.disconnect()`` and the sid stays in every room, after which
+        the server keeps broadcasting to a socket that is gone.
+
+        Parameters
+        ----------
+        reason: str | None
+            Disconnect reason. Newer python-socketio passes this; accepted and
+            logged so that the handler does not fail with a TypeError.
         """
         if not self.__is_identified_client():
             self.log.debug("Client disconnected before identification")
             return
 
-        for room in session.rooms:
-            # self.__leave_room_and_notify(room)
+        try:
+            left_rooms = self.__leave_all_rooms()
+
+            auth = db.Authenticatable.get(session.auth_id)
+            if auth is None:
+                self.log.warning(
+                    "Disconnecting client %s has no authenticatable record",
+                    session.auth_id,
+                )
+                return
+
+            # Read every attribute needed later while the instance is still
+            # attached: auth.save() commits, which expires the attributes, and
+            # the scoped session may be cleared before a later lazy load.
+            is_node = getattr(session, "type", None) == "node"
+            node_info = get_node_info(auth) if is_node else None
+
+            auth.status = AuthStatus.OFFLINE.value
+            auth.save()
+
+            if is_node:
+                emit_node_status_change(
+                    self.socketio, node_info, left_rooms, online=False
+                )
+
+                # delete any data on the node stored on the server (e.g.
+                # configuration data)
+                try:
+                    self.__clean_node_data(auth)
+                except Exception:
+                    self.log.exception("Failed to clean node data on disconnect")
+
+            self.log.info("%s disconnected", getattr(session, "name", session.auth_id))
+        except Exception:
+            self.log.exception(
+                "Error while handling disconnect; continuing so that the socket "
+                "is still removed from its rooms"
+            )
+        finally:
+            # cleanup (e.g. database session)
+            self.__cleanup()
+
+    def __leave_all_rooms(self) -> list[str]:
+        """
+        Remove the disconnecting client from every room it joined.
+
+        Socket.IO is the source of truth here. ``session.rooms`` is set as an
+        attribute on the socket session and is not guaranteed to survive, so it
+        cannot be relied upon while disconnecting.
+
+        Returns
+        -------
+        list[str]
+            The rooms the client was removed from.
+        """
+        # every client is implicitly in a room named after its own sid
+        left_rooms = [room for room in rooms() if room != request.sid]
+        for room in left_rooms:
             self.__leave_room_and_notify(room)
-
-        auth = db.Authenticatable.get(session.auth_id)
-        auth.status = AuthStatus.OFFLINE.value
-        auth.save()
-
-        # It appears to be necessary to use the root socketio instance
-        # otherwise events cannot be sent outside the current namespace.
-        # In this case, only events to '/tasks' can be emitted otherwise.
-        if session.type == "node":
-            self.log.warning("emitting to /admin")
-            self.socketio.emit("node-status-changed", namespace="/admin")
-            self.__alert_node_status(online=False, node=auth)
-
-            # delete any data on the node stored on the server (e.g.
-            # configuration data)
-            self.__clean_node_data(auth)
-
-        self.log.info(f"{session.name} disconnected")
-
-        # cleanup (e.g. database session)
-        self.__cleanup()
+        return left_rooms
 
     def on_message(self, message: str) -> None:
         """
@@ -347,9 +457,24 @@ class DefaultSocketNamespace(Namespace):
         ping and sets them as online.
         """
         auth = db.Authenticatable.get(session.auth_id)
+
+        # A node whose socket stayed up but whose pings stopped arriving is set
+        # to offline by the server's node status worker. Nobody was told when
+        # it came back, because on_connect never runs for such a node.
+        came_back_online = (
+            auth.status != AuthStatus.ONLINE.value
+            and getattr(session, "type", None) == "node"
+        )
+        # Read these before save(): committing expires the attributes.
+        node_info = get_node_info(auth) if came_back_online else None
+        node_rooms = get_node_rooms(auth) if came_back_online else None
+
         auth.status = AuthStatus.ONLINE.value
         auth.last_seen = dt.datetime.now(dt.timezone.utc)
         auth.save()
+
+        if came_back_online:
+            emit_node_status_change(self.socketio, node_info, node_rooms, online=True)
 
     def __join_room_and_notify(self, room: str) -> None:
         """
@@ -375,7 +500,7 @@ class DefaultSocketNamespace(Namespace):
             name of the room the client is leaving
         """
         leave_room(room)
-        msg = f"{session.name} left room {room}"
+        msg = f"{getattr(session, 'name', 'unidentified client')} left room {room}"
         self.log.info(msg)
         self.__notify_room_join_or_leave(room, msg)
 
@@ -391,26 +516,6 @@ class DefaultSocketNamespace(Namespace):
         # know about each other.
         if room != ALL_NODES_ROOM:
             emit("message", msg, room=room)
-
-    def __alert_node_status(self, online: bool, node: Authenticatable) -> None:
-        """
-        Send status update of nodes when they change on/offline status
-
-        Parameters
-        ----------
-        online: bool
-            Whether node is coming online or not
-        node: Authenticatable
-            The node SQLALchemy object
-        """
-        event = "node-online" if online else "node-offline"
-        for room in session.rooms:
-            self.socketio.emit(
-                event,
-                {"id": node.id, "name": node.name, "org_id": node.organization.id},
-                namespace="/tasks",
-                room=room,
-            )
 
     def on_algorithm_log(self, data: dict) -> None:
         """
