@@ -62,6 +62,7 @@ from vantage6.node.globals import (
     TIME_LIMIT_RETRY_CONNECT_NODE,
     TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET,
     DEFAULT_SOCKET_RECONNECTION_DELAY_MAX,
+    SOCKET_RECONNECT_RETRY_DELAY_SECONDS,
     ERROR_RETRY_DELAY_SECONDS,
 )
 from vantage6.common.client.node_client import NodeClient
@@ -1121,6 +1122,14 @@ class Node:
             reconnection_delay_max,
         )
 
+        # A half-open client is still attached to the server, so drop it before
+        # opening a new one to avoid leaking a connection per reconnect.
+        if getattr(self, "socketIO", None):
+            try:
+                self.socketIO.shutdown()
+            except Exception:
+                self.log.exception("Error closing the previous socket connection")
+
         self.socketIO = SocketIO(
             request_timeout=60,
             reconnection_delay_max=reconnection_delay_max,
@@ -1139,7 +1148,7 @@ class Node:
 
         # Log the outcome
         i = 0
-        while not self.socketIO.connected:
+        while not self.__is_socket_ready():
             if i > TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET:
                 self.log.critical(
                     "Could not connect to the websocket channels, do you have a "
@@ -1163,6 +1172,23 @@ class Node:
         self.socketIO.start_background_task(self.__socket_ping_worker)
         return True
 
+    def __is_socket_ready(self) -> bool:
+        """
+        Check whether the node can actually communicate over the /tasks
+        namespace.
+
+        Returns
+        -------
+        bool
+            Whether the /tasks namespace is connected.
+        """
+        # `Client.connected` only tells us that the default namespace is up: it
+        # stays True when the server refuses or drops /tasks. Emitting in that
+        # state raises BadNamespaceError on every ping, so check the namespace
+        # itself to detect a half-open connection.
+        socket = getattr(self, "socketIO", None)
+        return bool(socket and socket.connected and "/tasks" in socket.namespaces)
+
     def __socket_ping_worker(self) -> None:
         """
         Send ping messages periodically to the server over the socketIO
@@ -1173,7 +1199,7 @@ class Node:
 
         while True:
             try:
-                if self.socketIO.connected:
+                if self.__is_socket_ready():
                     self.socketIO.emit("ping", namespace="/tasks")
                 else:
                     # The socket.io client gives up permanently when the server
@@ -1188,6 +1214,12 @@ class Node:
                         self.sync_task_queue_with_server()
                         # connect_to_socket() started a new ping worker
                         return
+                    self.log.warning(
+                        "Reconnecting failed, retrying in %s seconds",
+                        SOCKET_RECONNECT_RETRY_DELAY_SECONDS,
+                    )
+                    time.sleep(SOCKET_RECONNECT_RETRY_DELAY_SECONDS)
+                    continue
             except Exception:
                 self.log.exception("Ping thread had an exception")
             # Wait before sending next ping

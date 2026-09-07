@@ -38,6 +38,12 @@ TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET = 60
 # would also need a higher `randomization_factor` to spread the load out.
 DEFAULT_SOCKET_RECONNECTION_DELAY_MAX = 60
 
+# Delay before the node rebuilds the websocket connection again after a failed
+# attempt. This is deliberately much longer than the ping interval: a node that
+# cannot (re)join the /tasks namespace - e.g. because the server rejects it -
+# would otherwise open a fresh connection every ping interval indefinitely.
+SOCKET_RECONNECT_RETRY_DELAY_SECONDS = 300
+
 # Pause after an unexpected error in a worker loop that talks to the server.
 # Without it a failing loop retries as fast as the CPU allows, which turns one
 # broken run into a stream of requests.
