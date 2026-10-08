@@ -38,8 +38,9 @@ import pynvml
 from docker import DockerClient
 
 from pathlib import Path
-from threading import Thread
+from threading import Event, Lock, Thread
 from socketio import Client as SocketIO
+from socketio.exceptions import ConnectionError as SocketIOConnectionError
 from gevent.pywsgi import WSGIServer
 from enum import Enum
 
@@ -61,6 +62,11 @@ from vantage6.node.globals import (
     SLEEP_BTWN_NODE_LOGIN_TRIES,
     TIME_LIMIT_RETRY_CONNECT_NODE,
     TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET,
+    DEFAULT_SOCKET_RECONNECTION_DELAY_MAX,
+    DEFAULT_SOCKET_RANDOMIZATION_FACTOR,
+    SOCKET_RECONNECT_RETRY_DELAY_SECONDS,
+    SOCKET_RECONNECT_RETRY_DELAY_MAX_SECONDS,
+    ERROR_RETRY_DELAY_SECONDS,
 )
 from vantage6.common.client.node_client import NodeClient
 from vantage6.node import proxy_server
@@ -119,6 +125,9 @@ class Node:
         self.debug: dict = self.config.get("debug", {})
         self.queue = queue.Queue()
         self._using_encryption = None
+        # Serialises the threads that may rebuild the websocket connection
+        self.__socket_lock = Lock()
+        self.__stop_ping = Event()
 
         # initialize Node connection to the server
         self.client = NodeClient(
@@ -194,6 +203,15 @@ class Node:
         # Create a long-lasting websocket connection.
         self.log.debug("Creating websocket connection with the server")
         self.connect_to_socket()
+
+        # One ping worker for the lifetime of the node: it outlives the
+        # individual connections, so reconnects cannot leave the node without a
+        # ping thread or with several of them.
+        self.log.debug(
+            "Starting thread to ping the server to notify this node is online."
+        )
+        t = Thread(target=self.__socket_ping_worker, daemon=True)
+        t.start()
 
         # Connect the node to the isolated algorithm network *only* if we're
         # running in a docker container.
@@ -457,10 +475,18 @@ class Node:
             self.log.error(
                 "Container token could not be obtained: %s", token.get("msg")
             )
+            # `finished_at` must be set explicitly: the server overwrites it with
+            # whatever the payload contains, and it selects open runs on
+            # `finished_at IS NULL`. Without it the run stays open, is handed out
+            # again on the next sync, and the node keeps asking for a token that
+            # can never be issued.
             self.client.run.patch(
                 id_=task_incl_run["id"],
                 data={
                     "status": TaskStatus.FAILED,
+                    "finished_at": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
                     "log": "Could not obtain algorithm container token",
                 },
             )
@@ -559,6 +585,10 @@ class Node:
             except Exception as e:
                 self.log.error("Listening thread had an exception")
                 self.log.exception(e)
+            # wait() returns immediately while the socket is down, so without a
+            # pause this loop would spin at full speed until it is restored.
+            if not self.socketIO.connected:
+                time.sleep(ERROR_RETRY_DELAY_SECONDS)
 
     def __speaking_worker(self) -> None:
         """
@@ -632,6 +662,11 @@ class Node:
                 )
             except Exception:
                 self.log.exception("Speaking thread had an exception")
+                # Back off before looping again. `get_result()` normally blocks
+                # until a result is available, but if anything above it raises
+                # the loop restarts immediately, and the node then hammers the
+                # server as fast as it can.
+                time.sleep(ERROR_RETRY_DELAY_SECONDS)
 
     def __print_connection_error_logs(self):
         """Print error message when node cannot find the server"""
@@ -1069,36 +1104,125 @@ class Node:
                 container_name=container_name, config_alias=alias
             )
 
-    def connect_to_socket(self) -> None:
+    def connect_to_socket(self, exit_on_failure: bool = True) -> bool:
         """
         Create long-lasting websocket connection with the server. The
         connection is used to receive status updates, such as new tasks.
+
+        Parameters
+        ----------
+        exit_on_failure : bool
+            Whether to terminate the node when the connection cannot be
+            established. This is the desired behaviour on startup, but not
+            when reconnecting a node that is already running.
+
+        Returns
+        -------
+        bool
+            Whether the connection was established.
+        """
+        # The ping worker and the token handlers may all decide to reconnect at
+        # the same moment. Serialise them: without this they build connections
+        # that immediately supersede each other, and the server sees a burst of
+        # connects from a single node.
+        with self.__socket_lock:
+            if self.__is_socket_ready():
+                self.log.debug("Socket was already reconnected by another thread")
+                return True
+            return self.__create_socket_connection(exit_on_failure)
+
+    def __create_socket_connection(self, exit_on_failure: bool) -> bool:
+        """
+        Build the websocket connection. Callers must hold ``__socket_lock``.
+
+        Parameters
+        ----------
+        exit_on_failure : bool
+            Whether to terminate the node when the connection cannot be
+            established.
+
+        Returns
+        -------
+        bool
+            Whether the connection was established.
         """
         debug_mode = self.debug.get("socketio", False)
         if debug_mode:
             self.log.debug("Debug mode enabled for socketio")
+
+        socketio_config = self.config.get("socketio", {})
+
+        # Nodes retry forever, but the delay between attempts is capped. With
+        # python-socketio's default cap of 5 seconds a fleet of nodes keeps a
+        # struggling server under constant reconnect load, which makes an
+        # outage harder to recover from.
+        reconnection_delay_max = socketio_config.get(
+            "reconnection_delay_max", DEFAULT_SOCKET_RECONNECTION_DELAY_MAX
+        )
+        # Spread the reconnect attempts of a collaboration out over time, so
+        # that the nodes do not all hit the server in the same instant.
+        randomization_factor = socketio_config.get(
+            "randomization_factor", DEFAULT_SOCKET_RANDOMIZATION_FACTOR
+        )
+        self.log.debug(
+            "Websocket reconnect backoff capped at %s seconds with a "
+            "randomization factor of %s",
+            reconnection_delay_max,
+            randomization_factor,
+        )
+
+        # A half-open client is still attached to the server, so drop it before
+        # opening a new one to avoid leaking a connection per reconnect.
+        if getattr(self, "socketIO", None):
+            try:
+                self.socketIO.shutdown()
+            except Exception:
+                self.log.exception("Error closing the previous socket connection")
+
         self.socketIO = SocketIO(
-            request_timeout=60, logger=debug_mode, engineio_logger=debug_mode
+            request_timeout=60,
+            reconnection_delay_max=reconnection_delay_max,
+            randomization_factor=randomization_factor,
+            logger=debug_mode,
+            engineio_logger=debug_mode,
         )
 
         self.socketIO.register_namespace(NodeTaskNamespace("/tasks"))
         NodeTaskNamespace.node_worker_ref = self
 
-        self.socketIO.connect(
-            url=f"{self.client.host}:{self.client.port}",
-            headers=self.client.headers,
-            wait=False,
-        )
+        try:
+            self.socketIO.connect(
+                url=f"{self.client.host}:{self.client.port}",
+                headers=self.client.headers,
+                wait=False,
+            )
+        except SocketIOConnectionError as exc:
+            # Typically a 502 from the proxy while the server is down or
+            # restarting. Report it plainly: the caller decides whether to give
+            # up or to retry later.
+            self.log.error(
+                "Could not open a websocket connection to %s:%s: %s",
+                self.client.host,
+                self.client.port,
+                exc,
+            )
+            if exit_on_failure:
+                exit(1)
+            self.socketIO.shutdown()
+            return False
 
         # Log the outcome
         i = 0
-        while not self.socketIO.connected:
+        while not self.__is_socket_ready():
             if i > TIME_LIMIT_INITIAL_CONNECTION_WEBSOCKET:
                 self.log.critical(
                     "Could not connect to the websocket channels, do you have a "
                     "slow connection?"
                 )
-                exit(1)
+                if exit_on_failure:
+                    exit(1)
+                self.socketIO.shutdown()
+                return False
             self.log.debug("Waiting for socket connection...")
             time.sleep(1)
             i += 1
@@ -1106,30 +1230,71 @@ class Node:
         self.log.info(
             f"Connected to host={self.client.host} on port={self.client.port}"
         )
+        return True
 
-        self.log.debug(
-            "Starting thread to ping the server to notify this node is online."
-        )
-        self.socketIO.start_background_task(self.__socket_ping_worker)
+    def __is_socket_ready(self) -> bool:
+        """
+        Check whether the node can actually communicate over the /tasks
+        namespace.
+
+        Returns
+        -------
+        bool
+            Whether the /tasks namespace is connected.
+        """
+        # `Client.connected` only tells us that the default namespace is up: it
+        # stays True when the server refuses or drops /tasks. Emitting in that
+        # state raises BadNamespaceError on every ping, so check the namespace
+        # itself to detect a half-open connection.
+        socket = getattr(self, "socketIO", None)
+        return bool(socket and socket.connected and "/tasks" in socket.namespaces)
 
     def __socket_ping_worker(self) -> None:
         """
         Send ping messages periodically to the server over the socketIO
-        connection to notify the server that this node is online
+        connection to notify the server that this node is online.
+
+        This worker is started once and outlives the individual websocket
+        connections, so that a reconnect never leaves the node with zero or
+        with multiple ping threads.
         """
         # Wait for the socket to be connected to the namespaces on startup
-        time.sleep(5)
+        self.__stop_ping.wait(5)
 
-        while True:
+        reconnect_delay = SOCKET_RECONNECT_RETRY_DELAY_SECONDS
+        while not self.__stop_ping.is_set():
+            delay = PING_INTERVAL_SECONDS
             try:
-                if self.socketIO.connected:
+                if self.__is_socket_ready():
                     self.socketIO.emit("ping", namespace="/tasks")
+                    reconnect_delay = SOCKET_RECONNECT_RETRY_DELAY_SECONDS
                 else:
-                    self.log.debug("SocketIO is not connected, skipping ping")
+                    # The socket.io client gives up permanently when the server
+                    # closes the connection, and it reuses the authorization
+                    # header from the original connect, which by now may hold an
+                    # expired token. Rebuilding the connection solves both: it
+                    # picks up the current token and restores the session, which
+                    # is what marks this node online again.
+                    self.log.warning("Socket connection lost, reconnecting")
+                    if self.connect_to_socket(exit_on_failure=False):
+                        self.log.info("Socket connection restored")
+                        self.sync_task_queue_with_server()
+                        reconnect_delay = SOCKET_RECONNECT_RETRY_DELAY_SECONDS
+                    else:
+                        # Jittered, so that the nodes of a collaboration do not
+                        # retry in lockstep after a server outage.
+                        delay = reconnect_delay * random.uniform(0.5, 1.5)
+                        reconnect_delay = min(
+                            reconnect_delay * 2,
+                            SOCKET_RECONNECT_RETRY_DELAY_MAX_SECONDS,
+                        )
+                        self.log.warning(
+                            "Reconnecting failed, retrying in %.0f seconds", delay
+                        )
             except Exception:
                 self.log.exception("Ping thread had an exception")
             # Wait before sending next ping
-            time.sleep(PING_INTERVAL_SECONDS)
+            self.__stop_ping.wait(delay)
 
     def run_forever(self) -> None:
         """Keep checking queue for incoming tasks (and execute them)."""
@@ -1272,6 +1437,9 @@ class Node:
         self.log.info("Cleaning up node...")
 
         if hasattr(self, "socketIO") and self.socketIO:
+            # Stop the ping worker first, otherwise it emits into a socket that
+            # is already being torn down
+            self.__stop_ping.set()
             try:
                 self.socketIO.disconnect()
             except Exception:

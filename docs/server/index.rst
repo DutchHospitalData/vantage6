@@ -22,3 +22,4 @@ server.
     configure
     permissions
     shell
+    diagnosing_loops

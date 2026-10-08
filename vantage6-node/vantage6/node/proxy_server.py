@@ -33,6 +33,9 @@ server_url = None
 # Number of times the request is retried before the proxy server gives up
 RETRY = 3
 
+# Seconds to wait between retries
+RETRY_DELAY = 1
+
 
 def get_method(method: str) -> callable:
     """
@@ -114,8 +117,9 @@ def make_request(
     method = get_method(method)
 
     # Forward the request to the central server. Retry when an exception is
-    # raised (e.g. timeout or connection error) or when the server gives an
-    # error code greater than 210
+    # raised (e.g. timeout or connection error) or when the server gives a
+    # server-side error code. Client errors (4xx) are returned as-is: the
+    # request is malformed or not permitted, so repeating it only adds load.
     url = f"{server_url}/{endpoint}"
     for i in range(RETRY):
         try:
@@ -138,6 +142,15 @@ def make_request(
                 if "application/json" in response.headers.get("Content-Type"):
                     log.debug(response.json().get("msg", "no description..."))
 
+                if 400 <= response.status_code < 500:
+                    # Retrying will produce the same answer, so hand the error
+                    # back to the caller instead of hammering the server.
+                    return response
+
+                # Back off before retrying a server-side error. Without this the
+                # retries are issued back to back.
+                sleep(RETRY_DELAY)
+
             else:
                 # Exit the retry loop because we have collected a valid
                 # response
@@ -150,7 +163,7 @@ def make_request(
                 url,
             )
             log.debug("Exception details: %s", traceback.format_exc())
-            sleep(1)
+            sleep(RETRY_DELAY)
 
     # if all attempts fail, raise an exception to be handled by its parent
     raise Exception("Proxy request failed")
